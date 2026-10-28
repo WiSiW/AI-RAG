@@ -10,6 +10,7 @@ export default function KnowledgeBaseDetailPage() {
   const { kbId = "" } = useParams();
   const queryClient = useQueryClient();
   const [editOpen, setEditOpen] = useState(false);
+  const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [rerankId, setRerankId] = useState("");
   const [llmId, setLlmId] = useState("");
@@ -40,6 +41,7 @@ export default function KnowledgeBaseDetailPage() {
   const updateMutation = useMutation({
     mutationFn: () =>
       api.updateKnowledgeBase(kbId, {
+        name: name.trim(),
         description,
         rerank_profile_id: rerankId || null,
         default_llm_profile_id: llmId || null,
@@ -72,6 +74,7 @@ export default function KnowledgeBaseDetailPage() {
   });
 
   function openEdit(kb: KnowledgeBase) {
+    setName(kb.name);
     setDescription(kb.description);
     setRerankId(kb.rerank_profile_id ?? "");
     setLlmId(kb.default_llm_profile_id ?? "");
@@ -94,7 +97,7 @@ export default function KnowledgeBaseDetailPage() {
   if (kbQuery.error) return <ErrorState message={kbQuery.error.message} />;
   const kb = kbQuery.data!;
   const documents = docsQuery.data ?? [];
-  const actionError = deleteDocMutation.error ?? reindexMutation.error ?? updateMutation.error;
+  const actionError = deleteDocMutation.error ?? reindexMutation.error;
 
   return (
     <div>
@@ -188,6 +191,19 @@ export default function KnowledgeBaseDetailPage() {
       <Modal open={editOpen} onClose={() => setEditOpen(false)} title="知识库设置" wide>
         <form onSubmit={submitEdit} className="space-y-5">
           <div>
+            <label className="label">知识库名称</label>
+            <input
+              className="input"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              minLength={1}
+              maxLength={120}
+              placeholder="请输入知识库名称"
+              required
+            />
+            <div className="mt-1 text-right text-xs text-slate-400">{name.length} / 120</div>
+          </div>
+          <div>
             <label className="label">描述</label>
             <textarea className="input min-h-24" value={description} onChange={(event) => setDescription(event.target.value)} />
           </div>
@@ -225,12 +241,13 @@ export default function KnowledgeBaseDetailPage() {
             <div><label className="label">重排阈值</label><input className="input" type="number" step="0.01" value={threshold} onChange={(event) => setThreshold(event.target.value)} /></div>
             <div><label className="label">语义切分阈值</label><input className="input" type="number" step="0.01" min={0} max={1} value={semanticThreshold} onChange={(event) => setSemanticThreshold(event.target.value)} /></div>
           </div>
+          {updateMutation.error && <ErrorState message={updateMutation.error.message} />}
           <div className="rounded-xl bg-amber-50 p-3 text-xs leading-5 text-amber-700">
             Embedding 模型决定向量维度，创建后不可在此处更换。如需更换，请新建知识库并重新入库。
           </div>
           <div className="flex justify-end gap-3">
             <button type="button" className="btn-secondary" onClick={() => setEditOpen(false)}>取消</button>
-            <button type="submit" className="btn-primary" disabled={updateMutation.isPending}>{updateMutation.isPending ? "保存中..." : "保存设置"}</button>
+            <button type="submit" className="btn-primary" disabled={updateMutation.isPending || !name.trim()}>{updateMutation.isPending ? "保存中..." : "保存设置"}</button>
           </div>
         </form>
       </Modal>
