@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -26,7 +27,7 @@ from app.indexing.model_gateway import ModelGateway
 from app.indexing.types import RetrievedChunk
 from app.indexing.vector_store import MilvusVectorStore
 from app.memory.session_manager import ConversationMemory
-from app.retrieval.hybrid_retriever import HybridRetriever, Reranker
+from app.retrieval.hybrid_retriever import HybridRetriever, Reranker, weighted_rrf_fuse
 from app.schemas import (
     ChatRequest,
     ChatResponse,
@@ -39,6 +40,12 @@ from app.schemas import (
 
 NO_ANSWER = "根据现有资料无法回答该问题。"
 CitationUrlBuilder = Callable[[str], tuple[str | None, str | None]]
+
+
+@dataclass
+class RetrievalOutcome:
+    chunks: list[RetrievedChunk]
+    failed_knowledge_base_ids: list[str] = field(default_factory=list)
 
 
 def resolve_search_relevance(
@@ -88,18 +95,26 @@ class ChatService:
         self.memory = ConversationMemory(self.gateway)
 
     @staticmethod
-    def _get_kb(db: Session, kb_id: str) -> KnowledgeBase:
-        knowledge_base = db.get(KnowledgeBase, kb_id)
-        if knowledge_base is None:
-            raise NotFoundError("知识库不存在")
-        return knowledge_base
+    def _get_kbs(db: Session, kb_ids: list[str]) -> list[KnowledgeBase]:
+        knowledge_bases: list[KnowledgeBase] = []
+        for kb_id in dict.fromkeys(kb_ids):
+            knowledge_base = db.get(KnowledgeBase, kb_id)
+            if knowledge_base is None:
+                raise NotFoundError(f"知识库不存在：{kb_id}")
+            knowledge_bases.append(knowledge_base)
+        if not knowledge_bases:
+            raise ValidationError("至少选择一个知识库")
+        return knowledge_bases
 
     @staticmethod
     def _validate_document(
-        db: Session, knowledge_base: KnowledgeBase, document_id: str | None
+        db: Session, knowledge_bases: list[KnowledgeBase], document_id: str | None
     ) -> Document | None:
         if not document_id:
             return None
+        if len(knowledge_bases) != 1:
+            raise ValidationError("多知识库检索时不支持仅限定单个文档")
+        knowledge_base = knowledge_bases[0]
         document = db.get(Document, document_id)
         if document is None or document.kb_id != knowledge_base.id:
             raise NotFoundError("文档不属于当前知识库")
@@ -117,13 +132,36 @@ class ChatService:
         return profile
 
     def _llm_profile(
-        self, db: Session, knowledge_base: KnowledgeBase, override_id: str | None
+        self, db: Session, knowledge_bases: list[KnowledgeBase], override_id: str | None
     ) -> ModelProfile:
-        return self._profile(
-            db,
-            override_id or knowledge_base.default_llm_profile_id,
-            ModelKind.LLM,
-        )
+        if override_id:
+            return self._profile(db, override_id, ModelKind.LLM)
+        default_ids = {
+            knowledge_base.default_llm_profile_id
+            for knowledge_base in knowledge_bases
+            if knowledge_base.default_llm_profile_id
+        }
+        if len(default_ids) != 1:
+            message = (
+                "多个知识库默认问答模型不一致，请选择问答模型"
+                if default_ids
+                else "未配置 LLM 模型"
+            )
+            raise ValidationError(message)
+        return self._profile(db, next(iter(default_ids)), ModelKind.LLM)
+
+    def _rerank_profile(
+        self,
+        db: Session,
+        knowledge_bases: list[KnowledgeBase],
+        override_id: str | None,
+    ) -> ModelProfile | None:
+        if override_id:
+            return self._profile(db, override_id, ModelKind.RERANK)
+        rerank_ids = {kb.rerank_profile_id for kb in knowledge_bases}
+        if len(rerank_ids) == 1 and None not in rerank_ids:
+            return self._profile(db, next(iter(rerank_ids)), ModelKind.RERANK)
+        return None
 
     async def _rewrite_query(
         self,
@@ -131,10 +169,15 @@ class ChatService:
         query: str,
         history: str,
         llm_profile: ModelProfile,
+        scope: str = "",
     ) -> str:
         if not history.strip():
             return query
-        prompt = QUERY_REWRITE_PROMPT.format(history=history, question=query)
+        prompt = QUERY_REWRITE_PROMPT.format(
+            scope=scope or "未指定",
+            history=history,
+            question=query,
+        )
         try:
             rewritten = await self.gateway.complete(
                 llm_profile,
@@ -150,47 +193,124 @@ class ChatService:
     async def _retrieve(
         self,
         db: Session,
-        knowledge_base: KnowledgeBase,
+        knowledge_bases: list[KnowledgeBase],
         query: str,
         *,
         top_k: int | None = None,
         rerank: bool = True,
+        rerank_profile_id: str | None = None,
         document_id: str | None = None,
-    ) -> list[RetrievedChunk]:
-        embedding_profile = self._profile(
-            db, knowledge_base.embedding_profile_id, ModelKind.EMBEDDING
+        enforce_context_budget: bool = True,
+    ) -> RetrievalOutcome:
+        embedding_profiles: dict[str, ModelProfile] = {}
+        for knowledge_base in knowledge_bases:
+            profile = self._profile(db, knowledge_base.embedding_profile_id, ModelKind.EMBEDDING)
+            if not profile.dimensions:
+                raise ValidationError("Embedding 模型必须配置 dimensions")
+            embedding_profiles[profile.id] = profile
+
+        profile_ids = list(embedding_profiles)
+        embedding_results = await asyncio.gather(
+            *[self.gateway.embed_texts(embedding_profiles[profile_id], [query]) for profile_id in profile_ids],
+            return_exceptions=True,
         )
-        if not embedding_profile.dimensions:
-            raise ValidationError("Embedding 模型必须配置 dimensions")
-        query_vectors = await self.gateway.embed_texts(embedding_profile, [query])
-        if not query_vectors:
-            raise ValidationError("Embedding 服务未返回查询向量")
-        kb_settings = knowledge_base.settings or {}
-        candidates = await self.retriever.retrieve(
-            kb_id=knowledge_base.id,
-            query=query,
-            query_vector=query_vectors[0],
-            dimensions=embedding_profile.dimensions,
-            candidate_top_k=int(kb_settings.get("candidate_top_k", settings.rag_candidate_top_k)),
-            fusion_top_k=int(kb_settings.get("candidate_top_k", settings.rag_candidate_top_k)),
-            document_id=document_id,
+        query_vectors: dict[str, list[float]] = {}
+        for profile_id, result in zip(profile_ids, embedding_results, strict=True):
+            if isinstance(result, Exception):
+                logger.warning("embedding query failed for profile %s", profile_id, exc_info=result)
+                continue
+            if result:
+                query_vectors[profile_id] = result[0]
+
+        semaphore = asyncio.Semaphore(settings.rag_max_concurrency)
+
+        async def retrieve_one(knowledge_base: KnowledgeBase):
+            async with semaphore:
+                kb_settings = knowledge_base.settings or {}
+                return await self.retriever.retrieve_routes(
+                    kb_id=knowledge_base.id,
+                    query=query,
+                    query_vector=query_vectors.get(knowledge_base.embedding_profile_id),
+                    dimensions=embedding_profiles[knowledge_base.embedding_profile_id].dimensions or 0,
+                    candidate_top_k=int(
+                        kb_settings.get("candidate_top_k", settings.rag_candidate_top_k)
+                    ),
+                    document_id=document_id,
+                )
+
+        route_results = await asyncio.gather(
+            *[retrieve_one(knowledge_base) for knowledge_base in knowledge_bases],
+            return_exceptions=True,
         )
-        if not rerank:
-            result = candidates[:top_k] if top_k else candidates
-        else:
-            rerank_profile = (
-                self._profile(db, knowledge_base.rerank_profile_id, ModelKind.RERANK)
-                if knowledge_base.rerank_profile_id
-                else None
+        ranked_lists: list[tuple[list[RetrievedChunk], float]] = []
+        failed_knowledge_base_ids: list[str] = []
+        for knowledge_base, result in zip(knowledge_bases, route_results, strict=True):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "knowledge base retrieval failed: %s",
+                    knowledge_base.id,
+                    exc_info=result,
+                )
+                failed_knowledge_base_ids.append(knowledge_base.id)
+                continue
+            bm25_results, vector_results = result
+            weight = float((knowledge_base.settings or {}).get("fusion_weight", 1.0))
+            if bm25_results:
+                ranked_lists.append((bm25_results, weight))
+            if vector_results:
+                ranked_lists.append((vector_results, weight))
+
+        final_limit = top_k or (
+            settings.rag_final_top_k
+            if len(knowledge_bases) == 1
+            else settings.rag_multi_kb_final_top_k
+        )
+        candidates = weighted_rrf_fuse(
+            ranked_lists,
+            rrf_k=60,
+            top_k=max(settings.rag_global_candidate_top_k, final_limit * max(len(knowledge_bases), 1)),
+        )
+        kb_names = {kb.id: kb.name for kb in knowledge_bases}
+        for candidate in candidates:
+            candidate.metadata["kb_name"] = kb_names.get(candidate.kb_id, "")
+        candidates = [candidate for candidate in self._hydrate_chunks(db, candidates) if candidate.kb_id]
+
+        if rerank:
+            rerank_profile = self._rerank_profile(db, knowledge_bases, rerank_profile_id)
+            threshold = (
+                float((knowledge_bases[0].settings or {}).get("rerank_threshold", 0.3))
+                if len(knowledge_bases) == 1
+                else settings.rag_multi_kb_rerank_threshold
             )
             result = await self.reranker.rerank(
                 profile=rerank_profile,
                 query=query,
                 chunks=candidates,
-                top_k=top_k or int(kb_settings.get("final_top_k", settings.rag_final_top_k)),
-                threshold=float(kb_settings.get("rerank_threshold", 0.3)),
+                top_k=final_limit,
+                threshold=threshold,
             )
-        return self._hydrate_chunks(db, result)
+        else:
+            result = candidates[:final_limit]
+        if enforce_context_budget:
+            result = self._limit_context_tokens(result)
+        return RetrievalOutcome(
+            chunks=result,
+            failed_knowledge_base_ids=failed_knowledge_base_ids,
+        )
+
+    @staticmethod
+    def _limit_context_tokens(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        selected: list[RetrievedChunk] = []
+        total = 0
+        for chunk in chunks:
+            token_count = count_tokens(chunk.content)
+            if selected and total + token_count > settings.rag_multi_kb_max_context_tokens:
+                continue
+            selected.append(chunk)
+            total += token_count
+            if total >= settings.rag_multi_kb_max_context_tokens:
+                break
+        return selected
 
     @staticmethod
     def _hydrate_chunks(db: Session, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
@@ -220,6 +340,8 @@ class ChatService:
             {
                 "chunk_id": chunk.chunk_id,
                 "document_id": chunk.document_id,
+                "knowledge_base_id": chunk.kb_id,
+                "knowledge_base_name": chunk.metadata.get("kb_name", ""),
                 "source": chunk.source,
                 "section": chunk.section,
                 "content": chunk.content,
@@ -250,9 +372,22 @@ class ChatService:
         return citations
 
     @staticmethod
-    def _quality(results: list[SearchResult]) -> SearchQualitySummary:
+    def _quality(
+        results: list[SearchResult],
+        queried_knowledge_base_ids: list[str],
+        failed_knowledge_base_ids: list[str],
+    ) -> SearchQualitySummary:
+        hits_by_knowledge_base: dict[str, int] = {}
+        for result in results:
+            hits_by_knowledge_base[result.knowledge_base_id] = (
+                hits_by_knowledge_base.get(result.knowledge_base_id, 0) + 1
+            )
         if not results:
-            return SearchQualitySummary()
+            return SearchQualitySummary(
+                queried_knowledge_base_ids=queried_knowledge_base_ids,
+                failed_knowledge_base_ids=failed_knowledge_base_ids,
+                hits_by_knowledge_base=hits_by_knowledge_base,
+            )
         scores = [
             float(item.rerank_score if item.rerank_score is not None else item.rrf_score)
             for item in results
@@ -264,6 +399,9 @@ class ChatService:
             reranked_count=sum(1 for item in results if item.rerank_score is not None),
             vector_hits=sum(1 for item in results if item.vector_rank is not None),
             bm25_hits=sum(1 for item in results if item.bm25_rank is not None),
+            queried_knowledge_base_ids=queried_knowledge_base_ids,
+            failed_knowledge_base_ids=failed_knowledge_base_ids,
+            hits_by_knowledge_base=hits_by_knowledge_base,
         )
 
     async def search(
@@ -273,33 +411,37 @@ class ChatService:
         *,
         file_url_builder: CitationUrlBuilder | None = None,
     ) -> SearchResponse:
-        knowledge_base = self._get_kb(db, request.knowledge_base_id)
-        self._validate_document(db, knowledge_base, request.document_id)
+        knowledge_bases = self._get_kbs(db, request.knowledge_base_ids)
+        self._validate_document(db, knowledge_bases, request.document_id)
         rewritten_query = request.query
         if request.rewrite and request.conversation_id:
+            llm_profile = self._llm_profile(db, knowledge_bases, request.llm_profile_id)
             conversation = self.memory.get_or_create(
                 db,
-                kb_id=knowledge_base.id,
+                kb_ids=request.knowledge_base_ids,
                 conversation_id=request.conversation_id,
-                llm_profile_id=request.llm_profile_id
-                or knowledge_base.default_llm_profile_id
-                or "",
+                llm_profile_id=llm_profile.id,
                 first_query=request.query,
                 document_id=request.document_id,
             )
-            llm_profile = self._llm_profile(db, knowledge_base, request.llm_profile_id)
             history = self.memory.history_text(db, conversation)
             rewritten_query = await self._rewrite_query(
-                query=request.query, history=history, llm_profile=llm_profile
+                query=request.query,
+                history=history,
+                llm_profile=llm_profile,
+                scope="、".join(knowledge_base.name for knowledge_base in knowledge_bases),
             )
-        chunks = await self._retrieve(
+        outcome = await self._retrieve(
             db,
-            knowledge_base,
+            knowledge_bases,
             rewritten_query,
             top_k=request.top_k,
             rerank=request.rerank,
+            rerank_profile_id=request.rerank_profile_id,
             document_id=request.document_id,
+            enforce_context_budget=False,
         )
+        chunks = outcome.chunks
         results: list[SearchResult] = []
         for chunk in chunks:
             relevance_score, relevance_source = resolve_search_relevance(
@@ -313,6 +455,8 @@ class ChatService:
                 SearchResult(
                     chunk_id=chunk.chunk_id,
                     document_id=chunk.document_id,
+                    knowledge_base_id=chunk.kb_id,
+                    knowledge_base_name=str(chunk.metadata.get("kb_name", "")),
                     source=chunk.source,
                     section=chunk.section,
                     content=chunk.content,
@@ -333,7 +477,11 @@ class ChatService:
             query=request.query,
             rewritten_query=rewritten_query if rewritten_query != request.query else None,
             results=results,
-            quality=self._quality(results),
+            quality=self._quality(
+                results,
+                request.knowledge_base_ids,
+                outcome.failed_knowledge_base_ids,
+            ),
         )
 
     async def chat(
@@ -343,26 +491,34 @@ class ChatService:
         *,
         citation_url_builder: CitationUrlBuilder | None = None,
     ) -> ChatResponse:
-        knowledge_base = self._get_kb(db, request.knowledge_base_id)
-        self._validate_document(db, knowledge_base, request.document_id)
-        llm_profile = self._llm_profile(db, knowledge_base, request.llm_profile_id)
+        knowledge_bases = self._get_kbs(db, request.knowledge_base_ids)
+        self._validate_document(db, knowledge_bases, request.document_id)
+        llm_profile = self._llm_profile(db, knowledge_bases, request.llm_profile_id)
         conversation = self.memory.get_or_create(
             db,
-            kb_id=knowledge_base.id,
+            kb_ids=request.knowledge_base_ids,
             conversation_id=request.conversation_id,
             llm_profile_id=llm_profile.id,
             first_query=request.query,
             document_id=request.document_id,
         )
         effective_document_id = request.document_id or conversation.document_id
-        self._validate_document(db, knowledge_base, effective_document_id)
+        self._validate_document(db, knowledge_bases, effective_document_id)
         history = self.memory.history_text(db, conversation)
         rewritten_query = await self._rewrite_query(
-            query=request.query, history=history, llm_profile=llm_profile
+            query=request.query,
+            history=history,
+            llm_profile=llm_profile,
+            scope="、".join(knowledge_base.name for knowledge_base in knowledge_bases),
         )
-        chunks = await self._retrieve(
-            db, knowledge_base, rewritten_query, document_id=effective_document_id
+        outcome = await self._retrieve(
+            db,
+            knowledge_bases,
+            rewritten_query,
+            rerank_profile_id=request.rerank_profile_id,
+            document_id=effective_document_id,
         )
+        chunks = outcome.chunks
         if chunks:
             prompt = build_chat_prompt(request.query, chunks, history)
             answer = await self.gateway.complete(
@@ -378,6 +534,7 @@ class ChatService:
             parse_citations(answer, chunks), citation_url_builder
         )
         usage = self._usage(answer, chunks, llm_profile)
+        usage["failed_knowledge_base_ids"] = outcome.failed_knowledge_base_ids
         message = self.memory.add_exchange(
             db,
             conversation,
@@ -392,6 +549,7 @@ class ChatService:
         return ChatResponse(
             conversation_id=conversation.id,
             message_id=message.id,
+            knowledge_base_ids=request.knowledge_base_ids,
             answer=answer,
             citations=citations,
             rewritten_query=rewritten_query,
@@ -405,33 +563,47 @@ class ChatService:
         *,
         citation_url_builder: CitationUrlBuilder | None = None,
     ):
-        knowledge_base = self._get_kb(db, request.knowledge_base_id)
-        self._validate_document(db, knowledge_base, request.document_id)
-        llm_profile = self._llm_profile(db, knowledge_base, request.llm_profile_id)
+        knowledge_bases = self._get_kbs(db, request.knowledge_base_ids)
+        self._validate_document(db, knowledge_bases, request.document_id)
+        llm_profile = self._llm_profile(db, knowledge_bases, request.llm_profile_id)
         conversation = self.memory.get_or_create(
             db,
-            kb_id=knowledge_base.id,
+            kb_ids=request.knowledge_base_ids,
             conversation_id=request.conversation_id,
             llm_profile_id=llm_profile.id,
             first_query=request.query,
             document_id=request.document_id,
         )
         effective_document_id = request.document_id or conversation.document_id
-        self._validate_document(db, knowledge_base, effective_document_id)
+        self._validate_document(db, knowledge_bases, effective_document_id)
         history = self.memory.history_text(db, conversation)
         rewritten_query = await self._rewrite_query(
-            query=request.query, history=history, llm_profile=llm_profile
+            query=request.query,
+            history=history,
+            llm_profile=llm_profile,
+            scope="、".join(knowledge_base.name for knowledge_base in knowledge_bases),
         )
-        chunks = await self._retrieve(
-            db, knowledge_base, rewritten_query, document_id=effective_document_id
+        outcome = await self._retrieve(
+            db,
+            knowledge_bases,
+            rewritten_query,
+            rerank_profile_id=request.rerank_profile_id,
+            document_id=effective_document_id,
         )
+        chunks = outcome.chunks
         yield sse_event(
             "start",
             {
                 "conversation_id": conversation.id,
                 "document_id": conversation.document_id,
+                "knowledge_base_ids": request.knowledge_base_ids,
+                "knowledge_bases": [
+                    {"id": knowledge_base.id, "name": knowledge_base.name}
+                    for knowledge_base in knowledge_bases
+                ],
                 "rewritten_query": rewritten_query,
                 "context_count": len(chunks),
+                "failed_knowledge_base_ids": outcome.failed_knowledge_base_ids,
             },
         )
         answer_parts: list[str] = []
@@ -455,6 +627,7 @@ class ChatService:
                 parse_citations(answer, chunks), citation_url_builder
             )
             usage = self._usage(answer, chunks, llm_profile)
+            usage["failed_knowledge_base_ids"] = outcome.failed_knowledge_base_ids
             message = self.memory.add_exchange(
                 db,
                 conversation,

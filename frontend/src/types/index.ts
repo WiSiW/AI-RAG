@@ -112,6 +112,8 @@ export interface Citation {
   index: number;
   document_id: string;
   chunk_id: string;
+  knowledge_base_id: string;
+  knowledge_base_name: string;
   source: string;
   section: string;
   score: number;
@@ -134,7 +136,9 @@ export interface Message {
 
 export interface Conversation {
   id: string;
-  knowledge_base_id: string;
+  knowledge_base_id: string | null;
+  knowledge_base_ids: string[];
+  knowledge_base_names: string[];
   document_id: string | null;
   title: string;
   llm_profile_id: string | null;
@@ -151,6 +155,7 @@ export interface ConversationDetail extends Conversation {
 export interface ChatResponse {
   conversation_id: string;
   message_id: string;
+  knowledge_base_ids: string[];
   answer: string;
   citations: Citation[];
   rewritten_query: string;
@@ -167,6 +172,8 @@ export interface ModelTestResult {
 export interface SearchResult {
   chunk_id: string;
   document_id: string;
+  knowledge_base_id: string;
+  knowledge_base_name: string;
   source: string;
   section: string;
   content: string;
@@ -190,6 +197,9 @@ export interface SearchQuality {
   reranked_count: number;
   vector_hits: number;
   bm25_hits: number;
+  queried_knowledge_base_ids: string[];
+  failed_knowledge_base_ids: string[];
+  hits_by_knowledge_base: Record<string, number>;
 }
 
 export interface SearchResponse {

@@ -64,15 +64,29 @@ def _authenticate(
     return publication
 
 
-def _select_kb(publication: PublishedApi, requested_id: str | None) -> str:
+def _select_kbs(
+    db: Session,
+    publication: PublishedApi,
+    requested_ids: list[str],
+    document_id: str | None = None,
+) -> list[str]:
     allowed = publication.knowledge_base_ids or []
-    if requested_id:
-        if requested_id not in allowed:
+    if requested_ids:
+        if any(kb_id not in allowed for kb_id in requested_ids):
             raise AppError("该知识库未授权", status_code=403, code="knowledge_base_forbidden")
-        return requested_id
-    if len(allowed) == 1:
-        return allowed[0]
-    raise ValidationError("该接口绑定多个知识库，请指定 knowledge_base_id")
+        selected = list(dict.fromkeys(requested_ids))
+    else:
+        selected = list(allowed)
+    if not selected:
+        raise ValidationError("该接口未绑定知识库")
+    if document_id:
+        document = _validate_public_document(db, publication, document_id)
+        if document.kb_id not in selected:
+            raise AppError("该文档未授权", status_code=403, code="knowledge_base_forbidden")
+        if len(selected) > 1:
+            raise ValidationError("文档级问答只能选择一个知识库")
+        return [document.kb_id]
+    return selected
 
 
 def _public_base(request: Request) -> str:
@@ -168,9 +182,11 @@ async def public_qa(
         x_api_key=x_api_key,
     )
     settings_data = publication.settings or {}
-    kb_id = _select_kb(publication, request.knowledge_base_id)
+    kb_ids = _select_kbs(
+        db, publication, request.knowledge_base_ids, request.document_id
+    )
     chat_request = ChatRequest(
-        knowledge_base_id=kb_id,
+        knowledge_base_ids=kb_ids,
         query=request.query,
         conversation_id=request.conversation_id,
         llm_profile_id=publication.llm_profile_id,
@@ -223,9 +239,11 @@ async def public_search(
         x_api_key=x_api_key,
     )
     settings_data = publication.settings or {}
-    kb_id = _select_kb(publication, request.knowledge_base_id)
+    kb_ids = _select_kbs(
+        db, publication, request.knowledge_base_ids, request.document_id
+    )
     search_request = SearchRequest(
-        knowledge_base_id=kb_id,
+        knowledge_base_ids=kb_ids,
         query=request.query,
         top_k=request.top_k or int(settings_data.get("top_k", 5)),
         rerank=request.rerank if request.rerank is not None else bool(settings_data.get("rerank", True)),

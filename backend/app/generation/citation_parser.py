@@ -36,6 +36,8 @@ def parse_citations(answer: str, chunks: list[RetrievedChunk]) -> list[Citation]
                 index=index,
                 document_id=chunk.document_id,
                 chunk_id=chunk.chunk_id,
+                knowledge_base_id=chunk.kb_id,
+                knowledge_base_name=str(chunk.metadata.get("kb_name", "")),
                 source=chunk.source,
                 section=chunk.section,
                 score=chunk.rerank_score or chunk.rrf_score,

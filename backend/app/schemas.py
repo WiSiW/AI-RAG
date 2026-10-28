@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ModelKindValue = Literal["embedding", "rerank", "llm"]
 ChunkModeValue = Literal[
@@ -14,6 +14,20 @@ ChunkModeValue = Literal[
     "parent_child",
 ]
 PublicationKindValue = Literal["qa", "search"]
+
+
+def _normalize_scope(
+    knowledge_base_id: str | None,
+    knowledge_base_ids: list[str],
+    *,
+    required: bool,
+) -> list[str]:
+    if knowledge_base_id and knowledge_base_ids:
+        raise ValueError("knowledge_base_id 与 knowledge_base_ids 不能同时使用")
+    ids = list(dict.fromkeys(knowledge_base_ids or ([knowledge_base_id] if knowledge_base_id else [])))
+    if required and not ids:
+        raise ValueError("至少选择一个知识库")
+    return ids
 
 
 class ORMModel(BaseModel):
@@ -184,6 +198,8 @@ class Citation(BaseModel):
     index: int
     document_id: str = ""
     chunk_id: str
+    knowledge_base_id: str = ""
+    knowledge_base_name: str = ""
     source: str
     section: str
     score: float = 0
@@ -193,19 +209,33 @@ class Citation(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    knowledge_base_id: str
+    knowledge_base_id: str | None = None
+    knowledge_base_ids: list[str] = Field(default_factory=list, max_length=20)
     query: str = Field(min_length=1)
     top_k: int = Field(default=5, ge=1, le=50)
     rerank: bool = True
+    rerank_profile_id: str | None = None
     rewrite: bool = False
     llm_profile_id: str | None = None
     conversation_id: str | None = None
     document_id: str | None = None
 
+    @model_validator(mode="after")
+    def normalize_scope(self) -> "SearchRequest":
+        self.knowledge_base_ids = _normalize_scope(
+            self.knowledge_base_id, self.knowledge_base_ids, required=True
+        )
+        self.knowledge_base_id = (
+            self.knowledge_base_ids[0] if len(self.knowledge_base_ids) == 1 else None
+        )
+        return self
+
 
 class SearchResult(BaseModel):
     chunk_id: str
     document_id: str
+    knowledge_base_id: str = ""
+    knowledge_base_name: str = ""
     source: str
     section: str
     content: str
@@ -229,6 +259,9 @@ class SearchQualitySummary(BaseModel):
     reranked_count: int = 0
     vector_hits: int = 0
     bm25_hits: int = 0
+    queried_knowledge_base_ids: list[str] = Field(default_factory=list)
+    failed_knowledge_base_ids: list[str] = Field(default_factory=list)
+    hits_by_knowledge_base: dict[str, int] = Field(default_factory=dict)
 
 
 class SearchResponse(BaseModel):
@@ -239,17 +272,30 @@ class SearchResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    knowledge_base_id: str
+    knowledge_base_id: str | None = None
+    knowledge_base_ids: list[str] = Field(default_factory=list, max_length=20)
     query: str = Field(min_length=1, max_length=20000)
     conversation_id: str | None = None
     llm_profile_id: str | None = None
+    rerank_profile_id: str | None = None
     document_id: str | None = None
     stream: bool = True
+
+    @model_validator(mode="after")
+    def normalize_scope(self) -> "ChatRequest":
+        self.knowledge_base_ids = _normalize_scope(
+            self.knowledge_base_id, self.knowledge_base_ids, required=True
+        )
+        self.knowledge_base_id = (
+            self.knowledge_base_ids[0] if len(self.knowledge_base_ids) == 1 else None
+        )
+        return self
 
 
 class ChatResponse(BaseModel):
     conversation_id: str
     message_id: str
+    knowledge_base_ids: list[str] = Field(default_factory=list)
     answer: str
     citations: list[Citation]
     rewritten_query: str
@@ -270,7 +316,9 @@ class MessageRead(ORMModel):
 
 class ConversationRead(ORMModel):
     id: str
-    knowledge_base_id: str
+    knowledge_base_id: str | None = None
+    knowledge_base_ids: list[str] = Field(default_factory=list)
+    knowledge_base_names: list[str] = Field(default_factory=list)
     document_id: str | None = None
     title: str
     llm_profile_id: str | None
@@ -352,17 +400,39 @@ class PublishedApiCreated(PublishedApiRead):
 class PublicChatRequest(BaseModel):
     query: str = Field(min_length=1, max_length=20000)
     knowledge_base_id: str | None = None
+    knowledge_base_ids: list[str] = Field(default_factory=list, max_length=20)
     conversation_id: str | None = None
     document_id: str | None = None
     stream: bool = True
+
+    @model_validator(mode="after")
+    def normalize_scope(self) -> "PublicChatRequest":
+        self.knowledge_base_ids = _normalize_scope(
+            self.knowledge_base_id, self.knowledge_base_ids, required=False
+        )
+        self.knowledge_base_id = (
+            self.knowledge_base_ids[0] if len(self.knowledge_base_ids) == 1 else None
+        )
+        return self
 
 
 class PublicSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=20000)
     knowledge_base_id: str | None = None
+    knowledge_base_ids: list[str] = Field(default_factory=list, max_length=20)
     document_id: str | None = None
     top_k: int | None = Field(default=None, ge=1, le=50)
     rerank: bool | None = None
+
+    @model_validator(mode="after")
+    def normalize_scope(self) -> "PublicSearchRequest":
+        self.knowledge_base_ids = _normalize_scope(
+            self.knowledge_base_id, self.knowledge_base_ids, required=False
+        )
+        self.knowledge_base_id = (
+            self.knowledge_base_ids[0] if len(self.knowledge_base_ids) == 1 else None
+        )
+        return self
 
 
 class PublicCapabilities(BaseModel):

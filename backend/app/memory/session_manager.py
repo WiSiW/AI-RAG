@@ -7,8 +7,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.errors import NotFoundError
-from app.db.models import Conversation, Message, ModelProfile
+from app.core.errors import NotFoundError, ValidationError
+from app.db.models import (
+    Conversation,
+    ConversationKnowledgeBase,
+    Message,
+    ModelProfile,
+)
 from app.generation.prompts import SUMMARY_PROMPT
 from app.indexing.model_gateway import ModelGateway
 from app.schemas import Citation
@@ -39,34 +44,62 @@ class ConversationMemory:
         self,
         db: Session,
         *,
-        kb_id: str,
+        kb_ids: list[str],
         conversation_id: str | None,
         llm_profile_id: str,
         first_query: str,
         document_id: str | None = None,
     ) -> Conversation:
+        if not kb_ids:
+            raise ValidationError("至少选择一个知识库")
+        unique_kb_ids = list(dict.fromkeys(kb_ids))
         if conversation_id:
             conversation = db.get(Conversation, conversation_id)
-            if conversation is None or conversation.knowledge_base_id != kb_id:
+            if conversation is None:
                 raise NotFoundError("对话不存在")
+            saved_kb_ids = self.knowledge_base_ids(conversation)
+            if saved_kb_ids != unique_kb_ids:
+                raise ValidationError("对话知识库范围不匹配，请新建对话")
             if document_id and conversation.document_id and conversation.document_id != document_id:
                 raise NotFoundError("对话所属文档不匹配")
             if conversation.document_id is None and document_id:
                 conversation.document_id = document_id
             conversation.llm_profile_id = llm_profile_id
+            if not conversation.knowledge_base_links:
+                self._add_scope_links(conversation, unique_kb_ids)
             db.commit()
             return conversation
         conversation = Conversation(
             id=str(uuid.uuid4()),
-            knowledge_base_id=kb_id,
+            knowledge_base_id=unique_kb_ids[0],
             document_id=document_id,
             title=first_query.strip()[:80] or "新对话",
             llm_profile_id=llm_profile_id,
         )
         db.add(conversation)
+        db.flush()
+        self._add_scope_links(conversation, unique_kb_ids)
         db.commit()
         db.refresh(conversation)
         return conversation
+
+    @staticmethod
+    def knowledge_base_ids(conversation: Conversation) -> list[str]:
+        ids = [link.knowledge_base_id for link in conversation.knowledge_base_links]
+        if ids:
+            return ids
+        return [conversation.knowledge_base_id] if conversation.knowledge_base_id else []
+
+    @staticmethod
+    def _add_scope_links(conversation: Conversation, kb_ids: list[str]) -> None:
+        for position, kb_id in enumerate(kb_ids):
+            conversation.knowledge_base_links.append(
+                ConversationKnowledgeBase(
+                    conversation_id=conversation.id,
+                    knowledge_base_id=kb_id,
+                    position=position,
+                )
+            )
 
     def messages(self, db: Session, conversation_id: str) -> list[Message]:
         return list(

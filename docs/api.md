@@ -66,19 +66,39 @@ Authorization: Bearer <access_token>
 | DELETE | `/conversations/{id}` | 删除会话 |
 | POST | `/feedback` | 回答反馈 |
 
+多知识库请求使用 `knowledge_base_ids`：
+
+```json
+{
+  "knowledge_base_ids": ["kb-1", "kb-2"],
+  "query": "两个制度之间有什么差异？",
+  "llm_profile_id": "llm-1",
+  "stream": true
+}
+```
+
+兼容规则：
+
+- 旧的 `knowledge_base_id` 仍可用于单知识库请求。
+- `knowledge_base_id` 与 `knowledge_base_ids` 不能同时传递。
+- 多知识库请求不支持通过 `document_id` 限定单个文档。
+- 会话会固定本次选择的知识库范围；更改范围需要新建会话。
+
+发布接口的 `knowledge_base_ids` 是授权范围。调用时可传其子集；不传时默认查询全部已授权知识库。
+
 ### 流式事件
 
 `POST /chat` 且 `stream=true` 返回 `text/event-stream`：
 
 ```text
 event: start
-data: {"conversation_id":"...","rewritten_query":"...","context_count":5}
+data: {"conversation_id":"...","knowledge_base_ids":["kb-1","kb-2"],"rewritten_query":"...","context_count":5}
 
 event: token
 data: {"content":"回答片段"}
 
 event: citations
-data: {"citations":[{"index":1,"source":"制度.pdf","section":"第一章 > 1.1"}]}
+data: {"citations":[{"index":1,"knowledge_base_id":"kb-1","knowledge_base_name":"制度库","source":"制度.pdf","section":"第一章 > 1.1"}]}
 
 event: done
 data: {"conversation_id":"...","message_id":"...","usage":{...}}

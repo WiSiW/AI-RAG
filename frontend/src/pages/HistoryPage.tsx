@@ -35,15 +35,16 @@ export default function HistoryPage() {
               <div key={conversation.id} className="group flex items-center gap-4 px-5 py-4 transition hover:bg-slate-50/70">
                 <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-50 text-brand-700"><MessageSquare className="h-5 w-5" /></div>
                 <div className="min-w-0 flex-1">
-                  <Link to={`/chat?kb=${conversation.knowledge_base_id}&conversation=${conversation.id}`} className="block truncate font-medium text-slate-900 hover:text-brand-700">{conversation.title}</Link>
+                  <Link to={`/chat?kbs=${conversation.knowledge_base_ids.join(",")}&conversation=${conversation.id}`} className="block truncate font-medium text-slate-900 hover:text-brand-700">{conversation.title}</Link>
                   <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
                     <span>{conversation.message_count} 条消息</span>
+                    <span>{conversation.knowledge_base_names.join("、") || "知识库已删除"}</span>
                     <span>更新于 {formatDate(conversation.updated_at)}</span>
                     {conversation.summary && <span className="text-emerald-600">已生成摘要</span>}
                   </div>
                   {conversation.summary && <p className="mt-2 line-clamp-1 text-xs text-slate-400">{conversation.summary}</p>}
                 </div>
-                <Link to={`/chat?kb=${conversation.knowledge_base_id}&conversation=${conversation.id}`} className="grid h-9 w-9 place-items-center rounded-full text-slate-400 hover:bg-brand-50 hover:text-brand-700" aria-label="打开会话"><ArrowUpRight className="h-4 w-4" /></Link>
+                <Link to={`/chat?kbs=${conversation.knowledge_base_ids.join(",")}&conversation=${conversation.id}`} className="grid h-9 w-9 place-items-center rounded-full text-slate-400 hover:bg-brand-50 hover:text-brand-700" aria-label="打开会话"><ArrowUpRight className="h-4 w-4" /></Link>
                 <button
                   type="button"
                   onClick={() => {

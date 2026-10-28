@@ -4,13 +4,20 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import NotFoundError
 from app.core.security import get_current_admin
-from app.db.models import Conversation, Message
+from app.db.models import Conversation, KnowledgeBase, Message
 from app.db.session import get_db
 from app.memory.session_manager import ConversationMemory
 from app.schemas import ConversationDetail, ConversationRead, MessageRead
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 memory = ConversationMemory()
+
+
+def _knowledge_base_ids(conversation: Conversation) -> list[str]:
+    ids = [link.knowledge_base_id for link in conversation.knowledge_base_links]
+    if ids:
+        return ids
+    return [conversation.knowledge_base_id] if conversation.knowledge_base_id else []
 
 
 @router.get("", response_model=list[ConversationRead])
@@ -24,10 +31,27 @@ def list_conversations(
         .group_by(Conversation.id)
         .order_by(Conversation.updated_at.desc())
     ).all()
+    all_kb_ids = {
+        kb_id
+        for conversation, _ in rows
+        for kb_id in _knowledge_base_ids(conversation)
+    }
+    kb_names = {
+        knowledge_base.id: knowledge_base.name
+        for knowledge_base in db.scalars(
+            select(KnowledgeBase).where(KnowledgeBase.id.in_(all_kb_ids))
+        )
+    }
     return [
         ConversationRead(
             id=conversation.id,
             knowledge_base_id=conversation.knowledge_base_id,
+            knowledge_base_ids=_knowledge_base_ids(conversation),
+            knowledge_base_names=[
+                kb_names[kb_id]
+                for kb_id in _knowledge_base_ids(conversation)
+                if kb_id in kb_names
+            ],
             document_id=conversation.document_id,
             title=conversation.title,
             llm_profile_id=conversation.llm_profile_id,
@@ -50,9 +74,20 @@ def get_conversation(
     if conversation is None:
         raise NotFoundError("对话不存在")
     messages = memory.messages(db, conversation_id)
+    knowledge_base_ids = _knowledge_base_ids(conversation)
+    knowledge_bases = list(
+        db.scalars(
+            select(KnowledgeBase).where(KnowledgeBase.id.in_(knowledge_base_ids))
+        )
+    )
+    kb_names = {knowledge_base.id: knowledge_base.name for knowledge_base in knowledge_bases}
     return ConversationDetail(
         id=conversation.id,
         knowledge_base_id=conversation.knowledge_base_id,
+        knowledge_base_ids=knowledge_base_ids,
+        knowledge_base_names=[
+            kb_names[kb_id] for kb_id in knowledge_base_ids if kb_id in kb_names
+        ],
         document_id=conversation.document_id,
         title=conversation.title,
         llm_profile_id=conversation.llm_profile_id,

@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     query_rewrite_max_tokens: int = 256
     rag_candidate_top_k: int = 20
     rag_final_top_k: int = 5
+    rag_multi_kb_final_top_k: int = 6
+    rag_global_candidate_top_k: int = 60
+    rag_multi_kb_rerank_threshold: float = 0.3
+    rag_multi_kb_max_context_tokens: int = 6000
+    rag_max_concurrency: int = 8
 
     @property
     def cors_origin_list(self) -> list[str]:

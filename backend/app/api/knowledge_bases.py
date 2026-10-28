@@ -199,7 +199,15 @@ def delete_knowledge_base(
     vector_store.drop_knowledge_base(kb_id)
     bm25_store.delete_knowledge_base(kb_id)
     for conversation in db.scalars(select(Conversation).where(Conversation.knowledge_base_id == kb_id)):
-        db.delete(conversation)
+        remaining_kb_ids = [
+            link.knowledge_base_id
+            for link in conversation.knowledge_base_links
+            if link.knowledge_base_id != kb_id
+        ]
+        if remaining_kb_ids:
+            conversation.knowledge_base_id = remaining_kb_ids[0]
+        else:
+            db.delete(conversation)
     for document in documents:
         db.delete(document)
     db.delete(kb)

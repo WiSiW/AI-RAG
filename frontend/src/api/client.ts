@@ -219,10 +219,11 @@ function buildUploadForm(files: File[], options: UploadOptions): FormData {
 }
 
 export interface ChatPayload {
-  knowledge_base_id: string;
+  knowledge_base_ids: string[];
   query: string;
   conversation_id?: string;
   llm_profile_id?: string;
+  rerank_profile_id?: string;
   document_id?: string;
   stream: true;
 }

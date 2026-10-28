@@ -37,11 +37,26 @@ def _apply_schema_migrations() -> None:
         }
         if "document_id" not in conversation_columns:
             additions.append(("conversations", "document_id", "VARCHAR(36)"))
-    if not additions:
-        return
     with engine.begin() as connection:
         for table, column, ddl in additions:
             connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+        if "conversation_knowledge_bases" in tables and "conversations" in tables:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO conversation_knowledge_bases
+                        (conversation_id, knowledge_base_id, position, created_at)
+                    SELECT c.id, c.knowledge_base_id, 0, CURRENT_TIMESTAMP
+                    FROM conversations c
+                    WHERE c.knowledge_base_id IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM conversation_knowledge_bases ckb
+                          WHERE ckb.conversation_id = c.id
+                      )
+                    """
+                )
+            )
 
 
 def init_db() -> None:

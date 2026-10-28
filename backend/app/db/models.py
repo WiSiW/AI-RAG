@@ -164,6 +164,27 @@ class Conversation(Base):
     messages = relationship(
         "Message", back_populates="conversation", cascade="all, delete-orphan"
     )
+    knowledge_base_links = relationship(
+        "ConversationKnowledgeBase",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="ConversationKnowledgeBase.position",
+    )
+
+
+class ConversationKnowledgeBase(Base):
+    __tablename__ = "conversation_knowledge_bases"
+
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True
+    )
+    knowledge_base_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    conversation = relationship("Conversation", back_populates="knowledge_base_links")
 
 
 class Message(Base):

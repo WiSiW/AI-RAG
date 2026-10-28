@@ -30,6 +30,11 @@ export default function CitationList({ citations }: { citations: Citation[] }) {
                   <FileText className="h-3.5 w-3.5 text-slate-400" />
                   <span className="truncate">{citation.source}</span>
                 </div>
+                {citation.knowledge_base_name && (
+                  <div className="mt-1">
+                    <span className="chip bg-brand-50 text-[11px] text-brand-700">{citation.knowledge_base_name}</span>
+                  </div>
+                )}
                 <div className="mt-0.5 truncate text-xs text-slate-500">{citation.section}</div>
                 {!expanded && <div className="mt-1.5 line-clamp-2 text-xs leading-5 text-slate-500">{citation.snippet}</div>}
               </div>

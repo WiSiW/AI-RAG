@@ -6,6 +6,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
 import { api, streamChat } from "../api/client";
 import CitationList from "../components/CitationList";
+import KnowledgeBaseSelector from "../components/KnowledgeBaseSelector";
 import { ErrorState, LoadingState, PageHeader } from "../components/UI";
 import type { Citation } from "../types";
 
@@ -30,7 +31,12 @@ export default function ChatPage() {
   const queryClient = useQueryClient();
   const conversationParam = searchParams.get("conversation") ?? "";
   const kbParam = searchParams.get("kb") ?? "";
+  const kbsParam = searchParams.get("kbs") ?? "";
   const documentParam = searchParams.get("document") ?? "";
+  const initialKbIds = (kbsParam || kbParam)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
 
   const kbQuery = useQuery({ queryKey: ["knowledge-bases"], queryFn: api.listKnowledgeBases });
   const modelQuery = useQuery({ queryKey: ["models", "llm"], queryFn: () => api.listModels("llm") });
@@ -40,7 +46,7 @@ export default function ChatPage() {
     enabled: !!conversationParam,
   });
 
-  const [kbId, setKbId] = useState(kbParam);
+  const [kbIds, setKbIds] = useState<string[]>(initialKbIds);
   const [documentId, setDocumentId] = useState(documentParam);
   const [llmId, setLlmId] = useState("");
   const [conversationId, setConversationId] = useState(conversationParam);
@@ -48,37 +54,49 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState("");
+  const [warning, setWarning] = useState("");
   const [feedback, setFeedback] = useState<Record<string, 1 | -1>>({});
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const scopeInitializedRef = useRef(false);
 
   const documentsQuery = useQuery({
-    queryKey: ["documents", kbId],
-    queryFn: () => api.listDocuments(kbId),
-    enabled: !!kbId,
+    queryKey: ["documents", kbIds[0]],
+    queryFn: () => api.listDocuments(kbIds[0]),
+    enabled: kbIds.length === 1,
   });
   const knowledgeBases = kbQuery.data ?? [];
   const llmModels = modelQuery.data ?? [];
   const documents = (documentsQuery.data ?? []).filter((doc) => doc.status === "ready");
-  const selectedKb = useMemo(() => knowledgeBases.find((kb) => kb.id === kbId), [knowledgeBases, kbId]);
+  const selectedKbs = useMemo(
+    () => knowledgeBases.filter((kb) => kbIds.includes(kb.id)),
+    [knowledgeBases, kbIds],
+  );
 
   useEffect(() => {
-    if (!kbId && knowledgeBases.length) setKbId(kbParam || knowledgeBases[0].id);
-  }, [kbId, kbParam, knowledgeBases]);
+    if (scopeInitializedRef.current || !knowledgeBases.length) return;
+    const availableIds = new Set(knowledgeBases.map((knowledgeBase) => knowledgeBase.id));
+    const preferredIds = initialKbIds.filter((kbId) => availableIds.has(kbId));
+    setKbIds(preferredIds.length ? preferredIds : [knowledgeBases[0].id]);
+    scopeInitializedRef.current = true;
+  }, [initialKbIds, kbIds.length, knowledgeBases]);
 
   useEffect(() => {
-    if (!selectedKb) return;
-    const preferred = selectedKb.default_llm_profile_id;
-    if (!llmId || (preferred && !llmModels.some((model) => model.id === llmId))) {
+    if (!selectedKbs.length) return;
+    const preferredIds = new Set(
+      selectedKbs.map((kb) => kb.default_llm_profile_id).filter(Boolean),
+    );
+    const preferred = preferredIds.size === 1 ? [...preferredIds][0] : "";
+    if (!llmId || !llmModels.some((model) => model.id === llmId)) {
       setLlmId(preferred || llmModels[0]?.id || "");
     }
-  }, [selectedKb, llmId, llmModels]);
+  }, [selectedKbs, llmId, llmModels]);
 
   useEffect(() => {
     if (!conversationQuery.data) return;
     const conversation = conversationQuery.data;
     setConversationId(conversation.id);
-    setKbId(conversation.knowledge_base_id);
+    setKbIds(conversation.knowledge_base_ids);
     setDocumentId(conversation.document_id || "");
     setLlmId(conversation.llm_profile_id || "");
     setMessages(
@@ -106,8 +124,9 @@ export default function ChatPage() {
   async function send(event?: FormEvent) {
     event?.preventDefault();
     const query = input.trim();
-    if (!query || !kbId || !llmId || streaming) return;
+    if (!query || !kbIds.length || !llmId || streaming) return;
     setError("");
+    setWarning("");
     setInput("");
     const userView: ChatMessageView = { id: `user-${Date.now()}`, role: "user", content: query, citations: [] };
     const assistantView: ChatMessageView = { id: `assistant-${Date.now()}`, role: "assistant", content: "", citations: [], streaming: true };
@@ -121,7 +140,7 @@ export default function ChatPage() {
     try {
       await streamChat(
         {
-          knowledge_base_id: kbId,
+          knowledge_base_ids: kbIds,
           query,
           conversation_id: conversationId || undefined,
           llm_profile_id: llmId,
@@ -135,6 +154,13 @@ export default function ChatPage() {
               if (startedConversationId) {
                 activeConversationId = startedConversationId;
                 setConversationId(startedConversationId);
+              }
+              const failedIds = (data.failed_knowledge_base_ids ?? []) as string[];
+              if (failedIds.length) {
+                const failedNames = failedIds.map(
+                  (failedId) => knowledgeBases.find((kb) => kb.id === failedId)?.name ?? failedId,
+                );
+                setWarning(`部分知识库检索失败：${failedNames.join("、")}`);
               }
             } else if (eventName === "token") {
               answer += String(data.content ?? "");
@@ -162,7 +188,7 @@ export default function ChatPage() {
               void queryClient.invalidateQueries({ queryKey: ["conversations"] });
               if (activeConversationId) {
                 const documentQuery = documentId ? `&document=${documentId}` : "";
-                navigate(`/chat?kb=${kbId}${documentQuery}&conversation=${activeConversationId}`, { replace: true });
+                navigate(`/chat?kbs=${kbIds.join(",")}${documentQuery}&conversation=${activeConversationId}`, { replace: true });
                 void queryClient.invalidateQueries({ queryKey: ["conversation", activeConversationId] });
               }
             } else if (eventName === "error") {
@@ -199,8 +225,21 @@ export default function ChatPage() {
     setMessages([]);
     setInput("");
     setError("");
+    setWarning("");
     const documentQuery = documentId ? `&document=${documentId}` : "";
-    navigate(`/chat?kb=${kbId}${documentQuery}`, { replace: true });
+    navigate(`/chat?kbs=${kbIds.join(",")}${documentQuery}`, { replace: true });
+  }
+
+  function changeKnowledgeBases(nextIds: string[]) {
+    abortRef.current?.abort();
+    setKbIds(nextIds);
+    setDocumentId("");
+    setConversationId("");
+    setMessages([]);
+    setError("");
+    setWarning("");
+    const query = nextIds.length ? `?kbs=${nextIds.join(",")}` : "";
+    navigate(`/chat${query}`, { replace: true });
   }
 
   if (kbQuery.isLoading || modelQuery.isLoading) return <LoadingState />;
@@ -210,7 +249,7 @@ export default function ChatPage() {
 
   return (
     <div>
-      <PageHeader title="智能问答" description="检索使用查询改写、混合召回、RRF 融合与语义重排；所有事实性回答都会附带来源。" />
+      <PageHeader title="智能问答" description="支持跨知识库联合检索；每条回答都会标注知识库、文档和章节来源。" />
 
       {!knowledgeBases.length || !llmModels.length ? (
         <div className="panel p-8 text-center">
@@ -220,18 +259,25 @@ export default function ChatPage() {
         <div className="grid min-h-[72vh] gap-5 xl:grid-cols-[290px_1fr]">
           <aside className="panel h-fit p-4 xl:sticky xl:top-24">
             <div>
-              <label className="label">知识库</label>
-              <select className="input" value={kbId} onChange={(event) => { const nextKb = event.target.value; setKbId(nextKb); setDocumentId(""); setConversationId(""); setMessages([]); navigate(`/chat?kb=${nextKb}`, { replace: true }); }} disabled={streaming}>
-                {knowledgeBases.map((kb) => <option key={kb.id} value={kb.id}>{kb.name}</option>)}
-              </select>
+              <label className="label">知识库范围</label>
+              <KnowledgeBaseSelector
+                knowledgeBases={knowledgeBases}
+                value={kbIds}
+                onChange={changeKnowledgeBases}
+                disabled={streaming}
+              />
             </div>
             <div className="mt-4">
               <label className="label">问答范围</label>
-              <select className="input" value={documentId} onChange={(event) => { const nextDocument = event.target.value; setDocumentId(nextDocument); setConversationId(""); setMessages([]); const query = nextDocument ? `&document=${nextDocument}` : ""; navigate(`/chat?kb=${kbId}${query}`, { replace: true }); }} disabled={streaming}>
-                <option value="">整个知识库</option>
+              <select className="input" value={documentId} onChange={(event) => { const nextDocument = event.target.value; setDocumentId(nextDocument); setConversationId(""); setMessages([]); const query = nextDocument ? `&document=${nextDocument}` : ""; navigate(`/chat?kbs=${kbIds.join(",")}${query}`, { replace: true }); }} disabled={streaming || kbIds.length !== 1}>
+                <option value="">{kbIds.length > 1 ? "全部已选知识库" : "整个知识库"}</option>
                 {documents.map((document) => <option key={document.id} value={document.id}>{document.filename}</option>)}
               </select>
-              {documentId && <div className="mt-1 flex items-center gap-1 text-xs text-brand-700"><FileText className="h-3 w-3" />仅检索当前文档</div>}
+              {kbIds.length > 1 ? (
+                <div className="mt-1 text-xs text-slate-400">多知识库联动时不可限定单个文档</div>
+              ) : documentId ? (
+                <div className="mt-1 flex items-center gap-1 text-xs text-brand-700"><FileText className="h-3 w-3" />仅检索当前文档</div>
+              ) : null}
             </div>
             <div className="mt-4">
               <label className="label">问答模型</label>
@@ -241,8 +287,8 @@ export default function ChatPage() {
             </div>
             <button type="button" onClick={newConversation} className="btn-secondary mt-4 w-full"><MessageSquarePlus className="h-4 w-4" />新建对话</button>
             <div className="mt-5 rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-500">
-              <div className="mb-1 flex items-center gap-1.5 font-medium text-slate-700"><Sparkles className="h-3.5 w-3.5 text-brand-600" />首版能力</div>
-              查询改写、最近 10 轮记忆、超长会话摘要、SSE 流式输出与引用回链。
+              <div className="mb-1 flex items-center gap-1.5 font-medium text-slate-700"><Sparkles className="h-3.5 w-3.5 text-brand-600" />跨库检索</div>
+              各知识库按自身 Embedding 模型召回，经全局 RRF 融合与统一重排后生成回答。
             </div>
           </aside>
 
@@ -257,7 +303,7 @@ export default function ChatPage() {
                 <div className="mx-auto flex min-h-[42vh] max-w-2xl flex-col items-center justify-center text-center">
                   <div className="grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-brand-100 to-cyan-50 text-brand-700"><Bot className="h-7 w-7" /></div>
                   <h3 className="mt-5 text-lg font-semibold text-slate-900">向知识库提问</h3>
-                  <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">{documentId ? "回答只基于当前文档，并标注可点击的原文与分块来源。" : "回答只基于当前知识库中的文档，并标注可点击的原文与分块来源。"}</p>
+                  <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">{documentId ? "回答只基于当前文档，并标注可点击的原文与分块来源。" : `回答只基于已选的 ${selectedKbs.length} 个知识库，并标注可点击的原文与分块来源。`}</p>
                   <div className="mt-6 grid w-full gap-2 sm:grid-cols-3">
                     {prompts.map((prompt) => (
                       <button key={prompt} type="button" onClick={() => setInput(prompt)} className="rounded-xl border border-slate-200 bg-white p-3 text-left text-xs leading-5 text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/50">
@@ -302,6 +348,7 @@ export default function ChatPage() {
 
             <div className="border-t border-slate-100 bg-white/95 p-3 sm:p-4">
               {error && <div className="mb-3"><ErrorState message={error} /></div>}
+              {warning && <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{warning}</div>}
               <form onSubmit={send} className="mx-auto flex max-w-4xl items-end gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 focus-within:border-brand-300 focus-within:ring-4 focus-within:ring-brand-50">
                 <textarea
                   value={input}
@@ -319,7 +366,7 @@ export default function ChatPage() {
                 {streaming ? (
                   <button type="button" onClick={() => abortRef.current?.abort()} className="grid h-11 w-11 place-items-center rounded-xl bg-slate-200 text-slate-600" aria-label="停止生成"><CircleStop className="h-5 w-5" /></button>
                 ) : (
-                  <button type="submit" disabled={!input.trim() || !kbId || !llmId} className="grid h-11 w-11 place-items-center rounded-xl bg-brand-600 text-white shadow-sm hover:bg-brand-700 disabled:opacity-40" aria-label="发送"><Send className="h-5 w-5" /></button>
+                  <button type="submit" disabled={!input.trim() || !kbIds.length || !llmId} className="grid h-11 w-11 place-items-center rounded-xl bg-brand-600 text-white shadow-sm hover:bg-brand-700 disabled:opacity-40" aria-label="发送"><Send className="h-5 w-5" /></button>
                 )}
               </form>
               <div className="mt-2 flex items-center justify-center gap-1 text-[11px] text-slate-400"><ChevronDown className="h-3 w-3" />回答由模型生成，请结合引用来源核验关键事实。</div>
