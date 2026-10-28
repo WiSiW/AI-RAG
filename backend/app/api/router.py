@@ -1,0 +1,28 @@
+from fastapi import APIRouter
+
+from app.api import (
+    auth,
+    chat,
+    conversations,
+    documents,
+    feedback,
+    health,
+    knowledge_bases,
+    model_profiles,
+    public_api,
+    publications,
+    system,
+)
+
+api_router = APIRouter()
+api_router.include_router(auth.router)
+api_router.include_router(health.router)
+api_router.include_router(system.router)
+api_router.include_router(model_profiles.router)
+api_router.include_router(knowledge_bases.router)
+api_router.include_router(documents.router)
+api_router.include_router(chat.router)
+api_router.include_router(conversations.router)
+api_router.include_router(feedback.router)
+api_router.include_router(publications.router)
+api_router.include_router(public_api.router)

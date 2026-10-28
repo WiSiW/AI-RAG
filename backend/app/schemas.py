@@ -1,0 +1,393 @@
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+ModelKindValue = Literal["embedding", "rerank", "llm"]
+ChunkModeValue = Literal[
+    "structure",
+    "recursive",
+    "fixed",
+    "paragraph",
+    "sentence",
+    "semantic",
+    "parent_child",
+]
+PublicationKindValue = Literal["qa", "search"]
+
+
+class ORMModel(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class ModelProfileCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    kind: ModelKindValue
+    provider: str = Field(default="openai-compatible", max_length=50)
+    base_url: str = Field(min_length=1, max_length=500)
+    model_name: str = Field(min_length=1, max_length=200)
+    api_key: str | None = None
+    dimensions: int | None = Field(default=None, ge=1, le=65536)
+    config: dict[str, Any] = Field(default_factory=dict)
+    is_active: bool = True
+
+
+class ModelProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    provider: str | None = Field(default=None, max_length=50)
+    base_url: str | None = Field(default=None, min_length=1, max_length=500)
+    model_name: str | None = Field(default=None, min_length=1, max_length=200)
+    api_key: str | None = None
+    clear_api_key: bool = False
+    dimensions: int | None = Field(default=None, ge=1, le=65536)
+    config: dict[str, Any] | None = None
+    is_active: bool | None = None
+
+
+class ModelProfileRead(ORMModel):
+    id: str
+    name: str
+    kind: str
+    provider: str
+    base_url: str
+    model_name: str
+    dimensions: int | None
+    config: dict[str, Any]
+    is_active: bool
+    has_api_key: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelTestResult(BaseModel):
+    ok: bool
+    latency_ms: float
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class KnowledgeBaseCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+    embedding_profile_id: str
+    rerank_profile_id: str | None = None
+    default_llm_profile_id: str | None = None
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class KnowledgeBaseUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    rerank_profile_id: str | None = None
+    default_llm_profile_id: str | None = None
+    settings: dict[str, Any] | None = None
+
+
+class KnowledgeBaseRead(ORMModel):
+    id: str
+    name: str
+    description: str
+    embedding_profile_id: str
+    rerank_profile_id: str | None
+    default_llm_profile_id: str | None
+    settings: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+    document_count: int = 0
+    embedding_profile_name: str | None = None
+
+
+class DocumentRead(ORMModel):
+    id: str
+    kb_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    status: str
+    error: str | None
+    tags: list[str]
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    chunk_mode: str = "structure"
+    chunk_size: int
+    chunk_overlap: int
+    created_at: datetime
+    updated_at: datetime
+    chunk_count: int = 0
+
+
+class DocumentDetail(DocumentRead):
+    extracted_text: str
+
+
+class ChunkRead(ORMModel):
+    id: str
+    document_id: str
+    kb_id: str
+    chunk_index: int
+    content: str
+    section_path: str
+    token_count: int
+    metadata_json: dict[str, Any]
+
+
+class IngestionJobRead(ORMModel):
+    id: str
+    document_id: str
+    status: str
+    attempts: int
+    error: str | None
+    result: dict[str, Any]
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class UploadResponse(BaseModel):
+    document: DocumentRead
+    job: IngestionJobRead
+
+
+class BatchUploadItem(BaseModel):
+    filename: str
+    ok: bool
+    document: DocumentRead | None = None
+    job: IngestionJobRead | None = None
+    error: str | None = None
+
+
+class BatchUploadResponse(BaseModel):
+    items: list[BatchUploadItem]
+    accepted: int
+    failed: int
+
+
+class ServerArchiveRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=2000)
+    chunk_mode: ChunkModeValue | None = None
+    chunk_size: int | None = Field(default=None, ge=32, le=8192)
+    chunk_overlap: int | None = Field(default=None, ge=0, le=8191)
+    tags: str = ""
+
+
+class Citation(BaseModel):
+    index: int
+    document_id: str = ""
+    chunk_id: str
+    source: str
+    section: str
+    score: float = 0
+    snippet: str
+    file_url: str | None = None
+    preview_url: str | None = None
+
+
+class SearchRequest(BaseModel):
+    knowledge_base_id: str
+    query: str = Field(min_length=1)
+    top_k: int = Field(default=5, ge=1, le=50)
+    rerank: bool = True
+    rewrite: bool = False
+    llm_profile_id: str | None = None
+    conversation_id: str | None = None
+    document_id: str | None = None
+
+
+class SearchResult(BaseModel):
+    chunk_id: str
+    document_id: str
+    source: str
+    section: str
+    content: str
+    rrf_score: float = 0
+    rerank_score: float | None = None
+    relevance_score: float = 0
+    relevance_source: str = "rrf"
+    vector_score: float | None = None
+    bm25_score: float | None = None
+    vector_rank: int | None = None
+    bm25_rank: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    file_url: str | None = None
+    preview_url: str | None = None
+
+
+class SearchQualitySummary(BaseModel):
+    result_count: int = 0
+    avg_rrf_score: float = 0
+    best_score: float = 0
+    reranked_count: int = 0
+    vector_hits: int = 0
+    bm25_hits: int = 0
+
+
+class SearchResponse(BaseModel):
+    query: str
+    rewritten_query: str | None = None
+    results: list[SearchResult]
+    quality: SearchQualitySummary = Field(default_factory=SearchQualitySummary)
+
+
+class ChatRequest(BaseModel):
+    knowledge_base_id: str
+    query: str = Field(min_length=1, max_length=20000)
+    conversation_id: str | None = None
+    llm_profile_id: str | None = None
+    document_id: str | None = None
+    stream: bool = True
+
+
+class ChatResponse(BaseModel):
+    conversation_id: str
+    message_id: str
+    answer: str
+    citations: list[Citation]
+    rewritten_query: str
+    usage: dict[str, Any] = Field(default_factory=dict)
+
+
+class MessageRead(ORMModel):
+    id: str
+    conversation_id: str
+    role: str
+    content: str
+    rewritten_query: str
+    citations: list[Citation]
+    context: list[dict[str, Any]]
+    usage: dict[str, Any]
+    created_at: datetime
+
+
+class ConversationRead(ORMModel):
+    id: str
+    knowledge_base_id: str
+    document_id: str | None = None
+    title: str
+    llm_profile_id: str | None
+    summary: str
+    created_at: datetime
+    updated_at: datetime
+    message_count: int = 0
+
+
+class ConversationDetail(ConversationRead):
+    messages: list[MessageRead]
+
+
+class FeedbackCreate(BaseModel):
+    message_id: str
+    rating: int
+    comment: str = Field(default="", max_length=2000)
+
+    @field_validator("rating")
+    @classmethod
+    def validate_rating(cls, value: int) -> int:
+        if value not in (-1, 1):
+            raise ValueError("rating 只能为 1 或 -1")
+        return value
+
+
+class FeedbackRead(ORMModel):
+    id: str
+    message_id: str
+    rating: int
+    comment: str
+    created_at: datetime
+
+
+class PublishedApiCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    slug: str = Field(min_length=1, max_length=120, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    kind: PublicationKindValue = "qa"
+    description: str = ""
+    knowledge_base_ids: list[str] = Field(min_length=1)
+    llm_profile_id: str | None = None
+    settings: dict[str, Any] = Field(default_factory=dict)
+    is_active: bool = True
+
+
+class PublishedApiUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    slug: str | None = Field(default=None, min_length=1, max_length=120, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    kind: PublicationKindValue | None = None
+    description: str | None = None
+    knowledge_base_ids: list[str] | None = None
+    llm_profile_id: str | None = None
+    settings: dict[str, Any] | None = None
+    is_active: bool | None = None
+    rotate_api_key: bool = False
+
+
+class PublishedApiRead(ORMModel):
+    id: str
+    name: str
+    slug: str
+    kind: str
+    description: str
+    knowledge_base_ids: list[str]
+    llm_profile_id: str | None
+    settings: dict[str, Any]
+    api_key_prefix: str
+    is_active: bool
+    last_used_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    endpoint: str | None = None
+
+
+class PublishedApiCreated(PublishedApiRead):
+    api_key: str
+
+
+class PublicChatRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=20000)
+    knowledge_base_id: str | None = None
+    conversation_id: str | None = None
+    document_id: str | None = None
+    stream: bool = True
+
+
+class PublicSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=20000)
+    knowledge_base_id: str | None = None
+    document_id: str | None = None
+    top_k: int | None = Field(default=None, ge=1, le=50)
+    rerank: bool | None = None
+
+
+class PublicCapabilities(BaseModel):
+    publication: str
+    kind: str
+    knowledge_bases: list[dict[str, Any]]
+    models: list[dict[str, Any]] = Field(default_factory=list)
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapabilitiesResponse(BaseModel):
+    upload_max_mb: int
+    archive_max_mb: int
+    chunk_modes: list[dict[str, str]]
+    supported_extensions: list[str]
+
+
+class HealthComponent(BaseModel):
+    status: str
+    detail: str = ""
+
+
+class HealthResponse(BaseModel):
+    status: str
+    service: str
+    version: str
+    components: dict[str, HealthComponent] = Field(default_factory=dict)
+

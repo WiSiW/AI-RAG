@@ -1,0 +1,395 @@
+# 知源 · 企业知识中枢问答系统
+
+基于 FastAPI、React、Milvus、PostgreSQL、Redis 与 MinIO 的单管理员 RAG 知识问答平台。支持 PDF、DOCX、Markdown、EPUB 文档入库，使用向量检索 + BM25 混合召回、RRF 融合、Rerank 精排、查询改写、会话摘要和 SSE 流式回答。
+
+## 已实现能力
+
+- 单管理员账号登录与 JWT 鉴权
+- 模型配置管理：LLM、Embedding、Rerank，支持连通性测试
+- 知识库管理：固定 Embedding 模型、默认问答模型、召回与重排参数
+- 文档格式：PDF、DOCX、Markdown、EPUB
+- MinIO 原始文件存储，Celery + Redis 异步入库
+- 章节优先、token 感知、带重叠的分块
+- Milvus 向量索引 + Whoosh BM25 索引
+- 向量与 BM25 并行召回、RRF 融合、Rerank 精排
+- 查询改写、最近窗口记忆、超长会话摘要
+- SSE 流式问答、引用解析与文档/分块回链
+- 知识库文档管理、分块与原文预览
+- 历史会话、回答反馈
+- Docker Compose 单机部署
+- 后端单元/API 冒烟测试与前端生产构建
+
+## 整体架构
+
+```mermaid
+flowchart LR
+    U[管理员浏览器] --> W[React + Vite]
+    W -->|REST / SSE| A[FastAPI]
+    A --> P[(PostgreSQL)]
+    A --> R[(Redis)]
+    A --> M[(MinIO)]
+    A --> V[(Milvus)]
+    W -->|API| A
+    A --> Q[Celery Worker]
+    Q --> M
+    Q --> V
+    Q --> B[Whoosh BM25 索引]
+    A --> L[OpenAI-compatible LLM API]
+    A --> E[OpenAI-compatible Embedding API]
+    A --> K[Rerank HTTP API]
+```
+
+### 文档入库
+
+1. 上传文件并保存到 MinIO。
+2. PostgreSQL 创建文档与任务记录，返回 `202/201 + job_id` 语义。
+3. Celery Worker 下载文件，根据格式解析文本和章节结构。
+4. 以章节为边界、按 token 大小分块，并保留重叠。
+5. 调用 Embedding API 批量生成向量。
+6. 写入 Milvus 与 Whoosh，保存分块和提取文本到 PostgreSQL。
+7. 前端轮询任务状态，完成后可预览和检索。
+
+### 问答链路
+
+1. 读取会话摘要与最近消息。
+2. 有历史时，先调用 LLM 改写为独立查询。
+3. 并行执行 BM25 与向量检索。
+4. 使用 RRF 融合候选，再调用 Rerank API。
+5. 按阈值过滤后取 Top-K 上下文。
+6. 通过 OpenAI-compatible Chat API 流式生成回答。
+7. 解析 `[n]` 引用，映射为文档、章节与分块。
+8. 保存会话，并在消息数超过阈值后异步生成摘要。
+
+## 目录结构
+
+```text
+AI-RAG/
+├── backend/
+│   ├── app/
+│   │   ├── api/              # REST API
+│   │   ├── chunking/         # 章节与 token 分块
+│   │   ├── core/             # 配置、鉴权、存储、日志
+│   │   ├── db/               # SQLAlchemy 模型与会话
+│   │   ├── generation/       # Prompt 与引用解析
+│   │   ├── indexing/         # 模型网关、Milvus、BM25
+│   │   ├── memory/           # 会话窗口与摘要
+│   │   ├── parsing/          # PDF/DOCX/Markdown/EPUB
+│   │   ├── retrieval/        # 混合检索、RRF、Rerank
+│   │   ├── services/         # 问答与入库编排
+│   │   └── workers/          # Celery 任务
+│   └── tests/
+├── frontend/
+│   └── src/
+│       ├── api/
+│       ├── components/
+│       ├── pages/
+│       └── types/
+├── docs/
+├── docker-compose.yml
+├── .env.example
+└── README.md
+```
+
+## 快速启动
+
+### 1. 准备环境变量
+
+```powershell
+Copy-Item .env.example .env
+```
+
+至少修改以下值：
+
+```dotenv
+ZHIYUAN_SECRET_KEY=请替换为至少32位的随机字符串
+ZHIYUAN_ADMIN_PASSWORD=请替换为强密码
+```
+
+默认 `.env` 中的数据库、Redis、MinIO 与 Milvus 地址面向 Docker Compose 服务网络。
+
+> Docker Hub 的 `minio/minio` 镜像仓库已不再提供镜像。本项目使用 `bitnamilegacy/minio` 的归档兼容镜像，并在 Compose 中固定镜像摘要，避免受 `latest` 标签变化影响。
+
+### 2. 启动全部服务
+
+```powershell
+docker compose up -d --build
+```
+
+启动后：
+
+- Web 界面：<http://localhost:3000>
+- API 文档：<http://localhost:8000/api/docs>
+- MinIO 控制台：<http://localhost:9001>
+- Milvus：`localhost:19530`
+
+首次启动需要等待 PostgreSQL、Milvus 和 MinIO 就绪。可以检查：
+
+```powershell
+docker compose ps
+docker compose logs -f backend worker
+```
+
+## 首次使用流程
+
+1. 使用 `.env` 中的管理员账号登录。
+2. 打开“模型配置”，先添加模型。
+3. 创建知识库，绑定 Embedding 模型和默认问答模型。
+4. 上传 PDF、DOCX、Markdown 或 EPUB 文档。
+5. 等待入库状态变为“已就绪”。
+6. 在文档预览页检查分块和提取原文。
+7. 进入“智能问答”开始提问。
+
+## 模型 API 接入约定
+
+### LLM 与 Embedding
+
+LLM 和 Embedding 使用 OpenAI-compatible API：
+
+```text
+Base URL: https://your-provider.example.com/v1
+Model:    实际模型名称
+API Key:  按供应商要求填写，留空时发送 EMPTY
+```
+
+Embedding 配置必须填写真实向量维度。知识库创建后，其 Embedding 模型不可更换，否则已有向量维度会不一致。
+
+### Rerank
+
+Rerank 使用通用 HTTP 约定。默认请求：
+
+```text
+POST {base_url}/rerank
+```
+
+请求体：
+
+```json
+{
+  "model": "bge-reranker-v2-m3",
+  "query": "用户问题",
+  "documents": ["文档一", "文档二"],
+  "top_n": 2
+}
+```
+
+支持以下常见响应：
+
+- `{"results": [{"index": 0, "relevance_score": 0.9}]}`
+- `{"data": [{"index": 0, "score": 0.9}]}`
+- `{"scores": [0.9, 0.1]}`
+
+如果服务的路径不同，在模型“高级配置 JSON”中设置：
+
+```json
+{"rerank_path": "v1/rerank"}
+```
+
+## 本地开发
+
+### 后端
+
+```powershell
+cd backend
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
+
+本地运行时，需要把数据库等服务地址改为 `localhost`，或先通过 Compose 启动基础设施。
+
+### 前端
+
+```powershell
+cd frontend
+npm.cmd install
+npm.cmd run dev
+```
+
+Vite 开发服务器将 `/api` 代理到 `http://localhost:8000`。
+
+## 测试与检查
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m ruff check app tests
+.\.venv\Scripts\python.exe -m pytest -q
+
+cd ..\frontend
+npm.cmd run build
+```
+
+当前测试覆盖：
+
+- 章节路径与 token 分块
+- 长文本重叠切分
+- RRF 融合排序
+- 引用编号解析
+- Markdown / EPUB 解析
+- API 密钥加解密
+- 登录、模型配置与知识库创建 API 冒烟流程
+
+## 配置说明
+
+主要环境变量：
+
+| 变量 | 说明 |
+| --- | --- |
+| `ZHIYUAN_SECRET_KEY` | JWT 与 API 密钥加密主密钥 |
+| `ZHIYUAN_ADMIN_USERNAME` | 管理员用户名 |
+| `ZHIYUAN_ADMIN_PASSWORD` | 管理员密码 |
+| `ZHIYUAN_DATABASE_URL` | SQLAlchemy PostgreSQL URL |
+| `ZHIYUAN_REDIS_URL` | 会话缓存 Redis |
+| `ZHIYUAN_CELERY_BROKER_URL` | Celery Broker |
+| `ZHIYUAN_MINIO_*` | 对象存储配置 |
+| `ZHIYUAN_MILVUS_URI` | Milvus 地址 |
+| `ZHIYUAN_UPLOAD_MAX_MB` | 单文件大小上限 |
+| `ZHIYUAN_AUTO_CREATE_TABLES` | 启动时自动建表 |
+
+## 安全边界
+
+- 首版只有一个管理员，不提供多用户、多租户或知识库 ACL。
+- API Key 使用 `SECRET_KEY` 派生密钥加密后存入 PostgreSQL，但没有接入外部 KMS。修改 `SECRET_KEY` 后旧密钥将无法解密。
+- 文件仅按扩展名白名单和大小限制接收，生产环境建议增加病毒扫描和 MIME 深度校验。
+- 检索内容被视为不可信输入，Prompt 已加入提示注入防护指令，但不能替代模型侧安全策略。
+- 生产部署应补充 HTTPS、反向代理访问控制、数据库备份、日志采集和数据库迁移流程。
+
+## 当前限制
+
+- 暂不支持扫描 PDF/图片 OCR。
+- 一个知识库只能使用一个 Embedding 模型。
+- Whoosh 索引适合单机中小规模；更大规模建议替换为 OpenSearch/Elasticsearch。
+- Celery Worker 当前建议并发数为 1，避免 Whoosh 单写者竞争。
+- 首版使用 `create_all` 自动建表；正式迭代应接入 Alembic 迁移。
+
+
+## 分块模式
+
+知识库设置中可以配置默认分块模式，上传时也可对单批文档覆盖设置：
+
+| 模式 | 说明 |
+| --- | --- |
+| `structure` | 结构感知，按标题层级和 token 窗口切分，推荐默认使用 |
+| `recursive` | 递归字符，优先按段落、句子和字符边界切分 |
+| `fixed` | 固定 token 窗口，适合作为检索评测基线 |
+| `paragraph` | 段落聚合，优先保留完整段落 |
+| `sentence` | 句子聚合，减少中英文句子被截断 |
+| `semantic` | 计算相邻句向量相似度，在主题边界处切分，需要 Embedding 模型 |
+| `parent_child` | 子块召回、父块扩展，提高上下文完整性和召回精度 |
+
+分块模式、大小、重叠、语义阈值均可通过知识库设置或上传页面配置。
+
+## 批量上传与大文件
+
+页面支持：
+
+- 同时选择多个 PDF、DOCX、Markdown、EPUB 文件
+- 上传 ZIP、TAR、TAR.GZ 压缩包并安全解包
+- 从服务器导入目录读取压缩包
+- 逐个展示成功、失败与不支持的文件
+
+默认单文件上限为 2048 MB，压缩包解压上限为 4096 MB。上传过程按 1 MB 分块写入临时文件，再流式上传 MinIO，不会把整个大文件一次性读入内存。Nginx 已配置：
+
+```nginx
+client_max_body_size 4096m;
+proxy_request_buffering off;
+```
+
+服务器压缩包必须位于 `ZHIYUAN_IMPORT_ROOT` 目录内，接口会拒绝路径越界访问。Compose 中该目录位于共享卷 `/app/data/imports`。
+
+## 检索质量检查
+
+登录后进入“检索质检”页面，可以：
+
+- 选择整个知识库或单个文档
+- 查看查询改写结果
+- 查看向量分、BM25 分、向量排名、BM25 排名、RRF 分和 Rerank 分
+- 每个召回分块展示统一相关度结果，并标注来自 Rerank 精排或 RRF 融合
+- 查看召回文本全文，并打开原文与全部分块弹窗
+- 调整 Top K 和是否启用 Rerank 进行对比
+
+对应接口：
+
+```text
+POST /api/v1/search
+```
+
+## 发布问答与检索接口
+
+管理员可在“API 发布”中创建两种独立接口：
+
+- `qa`：问答接口
+- `search`：检索接口
+
+每个发布接口可配置：
+
+- 可访问知识库列表
+- 指定问答模型
+- Top K
+- 是否启用 Rerank
+- 是否允许 SSE 流式输出
+- 是否启用接口
+
+发布时仅展示一次完整 API Key，服务端只保存 SHA-256 哈希。支持立即轮换密钥。
+
+### 问答接口
+
+```bash
+curl -X POST "http://localhost:3000/api/v1/public/qa/customer-qa" \
+  -H "Authorization: Bearer zy_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"制度中的审批流程是什么？","stream":false}'
+```
+
+### 检索接口
+
+```bash
+curl -X POST "http://localhost:3000/api/v1/public/search/customer-search" \
+  -H "Authorization: Bearer zy_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"审批流程","top_k":10}'
+```
+
+返回结果中的 `file_url` 是短时签名的原始文件地址，可直接嵌入其他系统预览；`preview_url` 返回提取原文、文档元数据和全部分块。签名地址不暴露 API Key，并会验证文档是否属于该发布接口授权的知识库。
+
+如果由其他系统的浏览器前端直接调用发布接口，请把该系统的 Origin 加入 `ZHIYUAN_CORS_ORIGINS`；服务端到服务端调用不需要额外 CORS 配置。
+
+## 数据库兼容升级
+
+应用启动时会执行 `create_all`，并自动为已有数据库补充以下字段：
+
+- `documents.metadata_json`
+- `documents.chunk_mode`
+- `conversations.document_id`
+
+发布接口表会在启动时自动创建。该机制用于当前单机部署的兼容升级；生产环境仍建议后续引入正式数据库迁移工具。
+
+
+## Ollama Reranker 模型
+
+`bge-reranker-v2-m3` 是 cross-encoder 重排模型，不能通过 `ollama run` 使用，也不支持 Ollama 的 11434 端口。项目已提供独立启动脚本：
+
+```powershell
+.\scripts\start-reranker.ps1
+```
+
+脚本会从 Ollama 模型中解析 GGUF blob，并使用 Ollama 自带的 `llama-server.exe --rerank --pooling rank` 在 `11436` 端口启动重排服务。后台日志位于 `data/logs/`。
+
+前台调试方式：
+
+```powershell
+.\scripts\start-reranker.ps1 -Foreground
+```
+
+Rerank 模型配置应填写：
+
+```text
+Base URL: http://host.docker.internal:11436
+模型名称: qllama/bge-reranker-v2-m3
+高级配置: {"rerank_path":"rerank"}
+```
+
+重排接口：
+
+```text
+POST http://127.0.0.1:11436/rerank
+```

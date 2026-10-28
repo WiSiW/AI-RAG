@@ -1,0 +1,131 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: zhiyuan
+      POSTGRES_USER: zhiyuan
+      POSTGRES_PASSWORD: zhiyuan
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zhiyuan -d zhiyuan"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    # Docker Hub 的 minio/minio 已不再提供镜像；使用 Bitnami 归档的兼容镜像。
+    image: bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
+    environment:
+      MINIO_ROOT_USER: ${ZHIYUAN_MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${ZHIYUAN_MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BROWSER: "on"
+      MINIO_DATA_DIR: /bitnami/minio/data
+    volumes:
+      - minio_data:/bitnami/minio/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - etcd_data:/etcd
+
+  milvus:
+    image: milvusdb/milvus:v2.5.4
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${ZHIYUAN_MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${ZHIYUAN_MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET_NAME: milvus
+      COMMON_STORAGETYPE: minio
+      COMMON_SECURITY_AUTHORIZATIONENABLED: "false"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - etcd
+      - minio
+
+  backend:
+    build:
+      context: ./backend
+    image: ai-rag-backend:latest
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      milvus:
+        condition: service_started
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - app_data:/app/data
+    restart: unless-stopped
+
+  worker:
+    image: ai-rag-backend:latest
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      milvus:
+        condition: service_started
+    command: celery -A app.workers.celery_app:celery_app worker --loglevel=INFO --concurrency=1
+    volumes:
+      - app_data:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  etcd_data:
+  milvus_data:
+  app_data:
