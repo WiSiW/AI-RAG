@@ -2,6 +2,16 @@
 
 基于 FastAPI、React、Milvus、PostgreSQL、Redis 与 MinIO 的单管理员 RAG 知识问答平台。支持 PDF、DOCX、Markdown、EPUB 文档入库，使用向量检索 + BM25 混合召回、RRF 融合、Rerank 精排、查询改写、会话摘要和 SSE 流式回答。
 
+## 页面
+![](./img/knowledge.png)
+![](./img/knowledge-detail.png)
+![](./img/upload.png)
+![](./img/QA.png)
+![](./img/model.png)
+![](./img/model-detail.png)
+![](./img/search.png)
+![](./img/API.png)
+
 ## 已实现能力
 
 - 单管理员账号登录与 JWT 鉴权
