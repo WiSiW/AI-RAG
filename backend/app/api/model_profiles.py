@@ -123,6 +123,7 @@ def delete_profile(
             or_(
                 KnowledgeBase.embedding_profile_id == profile_id,
                 KnowledgeBase.rerank_profile_id == profile_id,
+                KnowledgeBase.enrichment_profile_id == profile_id,
                 KnowledgeBase.default_llm_profile_id == profile_id,
             )
         )

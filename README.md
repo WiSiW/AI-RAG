@@ -21,13 +21,15 @@
 ## 已实现能力
 
 - 单管理员账号登录与 JWT 鉴权
-- 模型配置管理：LLM、Embedding、Rerank，支持连通性测试
-- 知识库管理：固定 Embedding 模型、默认问答模型、召回与重排参数
+- 模型配置管理：LLM、分块增强、Embedding、Rerank，支持连通性测试
+- 知识库管理：固定 Embedding、分块增强与默认问答模型，配置召回、权重与重排参数
 - 文档格式：PDF、DOCX、Markdown、EPUB
 - MinIO 原始文件存储，Celery + Redis 异步入库
 - 章节优先、token 感知、带重叠的分块
-- Milvus 向量索引 + Whoosh BM25 索引
-- 向量与 BM25 并行召回、RRF 融合、Rerank 精排
+- 分块关键词、约 50 字摘要与 1–2 个假设问题生成，失败自动规则回退
+- Milvus 表示行多向量索引 + Whoosh 关键词增强 BM25 索引
+- L1 章节摘要、L2 原块/摘要/问题、L3 原子块与 BM25 多路召回、加权 RRF、Rerank 精排
+- 分块语义完整性评估：规则检测、LLM 语义评分、人工抽样复核与历史运行对比
 - 多知识库联合检索：按 Embedding 模型分组召回、全局 RRF 融合、统一重排与跨库引用
 - 查询改写、最近窗口记忆、超长会话摘要
 - SSE 流式问答、引用解析与文档/分块回链
@@ -62,16 +64,18 @@ flowchart LR
 2. PostgreSQL 创建文档与任务记录，返回 `202/201 + job_id` 语义。
 3. Celery Worker 下载文件，根据格式解析文本和章节结构。
 4. 以章节为边界、按 token 大小分块，并保留重叠。
-5. 调用 Embedding API 批量生成向量。
-6. 写入 Milvus 与 Whoosh，保存分块和提取文本到 PostgreSQL。
-7. 前端轮询任务状态，完成后可预览和检索。
+5. 调用分块增强模型生成关键词、摘要和假设问题；模型失败时使用规则回退。
+6. 构建 L1 章节摘要、L2 常规段落和 L3 关键句/表格行/参数/错误代码原子块。
+7. 为 L1 摘要、L2 原块/摘要/问题及 L3 原子块生成 Embedding，并在 Milvus 中通过 chunk_id 关联。
+8. 写入 v2 Milvus/Whoosh 索引，保存增强字段和提取文本到 PostgreSQL。
+9. 前端轮询任务状态，完成后可预览和检索。
 
 ### 问答链路
 
 1. 读取会话摘要与最近消息。
 2. 有历史时，先调用 LLM 改写为独立查询。
-3. 按所选知识库并行执行 BM25 与向量检索；不同 Embedding 模型分别生成查询向量。
-4. 使用全局加权 RRF 融合跨库候选，再调用统一 Rerank API。
+3. 按所选知识库并行执行 BM25、L1 摘要、L2 原块/摘要/问题及 L3 原子块检索；不同 Embedding 模型分别生成查询向量。
+4. 按知识库 `retrieval_weights` 执行全局加权 RRF，再调用统一 Rerank API。
 5. 按阈值过滤后取 Top-K 上下文。
 6. 通过 OpenAI-compatible Chat API 流式生成回答。
 7. 解析 `[n]` 引用，映射为文档、章节与分块。
@@ -261,6 +265,9 @@ npm.cmd run build
 | `ZHIYUAN_MILVUS_URI` | Milvus 地址 |
 | `ZHIYUAN_UPLOAD_MAX_MB` | 单文件大小上限 |
 | `ZHIYUAN_AUTO_CREATE_TABLES` | 启动时自动建表 |
+| `ZHIYUAN_RAG_PARENT_CONTEXT_TOKENS` | parent-document 命中位置前后各保留的 token 数 |
+| `ZHIYUAN_RAG_NEIGHBOR_CONTEXT_TOKENS` | 前/后邻接块追加的 token 数 |
+| `ZHIYUAN_RAG_CONTEXT_WINDOW_MAX_TOKENS` | 单个命中块动态上下文上限 |
 
 ## 安全边界
 
@@ -295,6 +302,38 @@ npm.cmd run build
 
 分块模式、大小、重叠、语义阈值均可通过知识库设置或上传页面配置。
 
+## 分块增强与索引迁移
+
+- 每个 chunk 的原始 `content`、章节和 `chunk_id` 保持不变，关键词、摘要和问题作为独立派生字段保存。
+- 新知识库默认创建 v2 表示行索引；`retrieval_weights` 默认 L1/L3 为 `0.8/0.6`，其余路由为 `1.0`。
+- 存量知识库可通过知识库详情页的“重建增强索引”分批生成增强字段并重建 v2 索引，完成后自动切换。
+- 回填期间检索继续使用 v1；已完成文档可断点重试，失败知识库不会切换索引版本。
+
+## 多粒度索引
+
+| 粒度 | 内容 | 索引方式 | 关键元数据 |
+| --- | --- | --- | --- |
+| L1 | 每个章节/小节摘要，带章节标题 | 摘要向量 + BM25 | 父 L2 chunk ID、页码、源 token 数 |
+| L2 | 常规 512–1024 token 段落及增强表示 | BM25 + 原块/摘要/问题向量 | 章节路径、页码、关键词、假设问题 |
+| L3 | 关键句、表格行、参数行、代码行、错误/异常行 | 密集向量 | `parent_chunk_id`、父 chunk 序号、页码、抽取原因 |
+
+L1 和 L2 进入 Whoosh BM25，L3 只进入 Milvus 密集向量索引。检索权重可在知识库设置中分别调整；默认 L1 为 `0.8`、L3 为 `0.6`，其余路由为 `1.0`。
+
+## 上下文窗口
+
+- 每个 chunk 在索引时生成独立 `context_prefix`，包含文档标题、章节路径及上级/父段摘要；前缀参与 BM25 和原始向量，但不修改原始 `content`。
+- Chat 检索在 Rerank 后动态构建 `context_text`：保留命中小块，从 parent-document 内容中截取命中位置前后的局部窗口，再附加前后邻接块。
+- 父窗口和邻块受 token 预算控制，并会去重；Search 接口继续返回未展开小块，Chat 生成 Prompt 使用 `context_text`。
+- 相关配置：`ZHIYUAN_RAG_PARENT_CONTEXT_TOKENS=320`、`ZHIYUAN_RAG_NEIGHBOR_CONTEXT_TOKENS=180`、`ZHIYUAN_RAG_CONTEXT_WINDOW_MAX_TOKENS=1200`。
+
+## 分块语义完整性评估
+
+- 支持按文档或整个知识库异步评估 L1/L2/L3，不修改、不重新生成现有索引。
+- 自动规则检测断句、未闭合结构、表格/代码损坏、源文本覆盖、粒度尺寸和元数据完整性。
+- LLM 按粒度 Rubric 评判自包含性、事实完整性、上下文依赖和整改建议；失败时保留规则结果并将运行标记为 `partial`。
+- 每次运行保存 chunk、父块、章节源文本和前后邻块快照，支持历史结果和跨分块配置对比。
+- 人工抽样按粒度分层，可提交 1–5 分、问题标签和备注；汇总中展示人工-LLM MAE 与相关性。
+
 ## 批量上传与大文件
 
 页面支持：
@@ -319,7 +358,7 @@ proxy_request_buffering off;
 
 - 选择整个知识库或单个文档
 - 查看查询改写结果
-- 查看向量分、BM25 分、向量排名、BM25 排名、RRF 分和 Rerank 分
+- 查看原块/摘要/问题各召回路由的分数、排名与命中标签
 - 每个召回分块展示统一相关度结果，并标注来自 Rerank 精排或 RRF 融合
 - 查看召回文本全文，并打开原文与全部分块弹窗
 - 调整 Top K 和是否启用 Rerank 进行对比

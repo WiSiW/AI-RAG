@@ -13,6 +13,7 @@ export default function KnowledgeBaseDetailPage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [rerankId, setRerankId] = useState("");
+  const [enrichmentId, setEnrichmentId] = useState("");
   const [llmId, setLlmId] = useState("");
   const [candidateTopK, setCandidateTopK] = useState("20");
   const [finalTopK, setFinalTopK] = useState("5");
@@ -21,8 +22,22 @@ export default function KnowledgeBaseDetailPage() {
   const [chunkSize, setChunkSize] = useState("512");
   const [chunkOverlap, setChunkOverlap] = useState("64");
   const [semanticThreshold, setSemanticThreshold] = useState("0.72");
+  const [bm25Weight, setBm25Weight] = useState("1");
+  const [l1Weight, setL1Weight] = useState("0.8");
+  const [originalWeight, setOriginalWeight] = useState("1");
+  const [summaryWeight, setSummaryWeight] = useState("1");
+  const [questionWeight, setQuestionWeight] = useState("1");
+  const [l3Weight, setL3Weight] = useState("0.6");
 
-  const kbQuery = useQuery({ queryKey: ["knowledge-base", kbId], queryFn: () => api.getKnowledgeBase(kbId), enabled: !!kbId });
+  const kbQuery = useQuery({
+    queryKey: ["knowledge-base", kbId],
+    queryFn: () => api.getKnowledgeBase(kbId),
+    enabled: !!kbId,
+    refetchInterval: (query) => {
+      const migration = query.state.data?.settings.index_migration as Record<string, unknown> | undefined;
+      return migration?.status === "queued" || migration?.status === "running" ? 2500 : false;
+    },
+  });
   const docsQuery = useQuery({
     queryKey: ["documents", kbId],
     queryFn: () => api.listDocuments(kbId),
@@ -36,6 +51,7 @@ export default function KnowledgeBaseDetailPage() {
   const capabilitiesQuery = useQuery({ queryKey: ["capabilities"], queryFn: api.getCapabilities });
   const models = modelQuery.data ?? [];
   const rerankModels = useMemo(() => models.filter((item) => item.kind === "rerank"), [models]);
+  const enrichmentModels = useMemo(() => models.filter((item) => item.kind === "enrichment"), [models]);
   const llmModels = useMemo(() => models.filter((item) => item.kind === "llm"), [models]);
 
   const updateMutation = useMutation({
@@ -44,6 +60,7 @@ export default function KnowledgeBaseDetailPage() {
         name: name.trim(),
         description,
         rerank_profile_id: rerankId || null,
+        enrichment_profile_id: enrichmentId || null,
         default_llm_profile_id: llmId || null,
         settings: {
           candidate_top_k: Number(candidateTopK),
@@ -53,6 +70,14 @@ export default function KnowledgeBaseDetailPage() {
           chunk_size: Number(chunkSize),
           chunk_overlap: Number(chunkOverlap),
           semantic_threshold: Number(semanticThreshold),
+          retrieval_weights: {
+            bm25: Number(bm25Weight),
+            l1: Number(l1Weight),
+            original: Number(originalWeight),
+            summary: Number(summaryWeight),
+            questions: Number(questionWeight),
+            l3: Number(l3Weight),
+          },
         },
       }),
     onSuccess: async () => {
@@ -72,11 +97,16 @@ export default function KnowledgeBaseDetailPage() {
     mutationFn: api.reindexDocument,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["documents", kbId] }),
   });
+  const rebuildIndexMutation = useMutation({
+    mutationFn: () => api.rebuildKnowledgeBaseIndex(kbId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["knowledge-base", kbId] }),
+  });
 
   function openEdit(kb: KnowledgeBase) {
     setName(kb.name);
     setDescription(kb.description);
     setRerankId(kb.rerank_profile_id ?? "");
+    setEnrichmentId(kb.enrichment_profile_id ?? "");
     setLlmId(kb.default_llm_profile_id ?? "");
     setCandidateTopK(String(kb.settings.candidate_top_k ?? 20));
     setFinalTopK(String(kb.settings.final_top_k ?? 5));
@@ -85,6 +115,13 @@ export default function KnowledgeBaseDetailPage() {
     setChunkSize(String(kb.settings.chunk_size ?? 512));
     setChunkOverlap(String(kb.settings.chunk_overlap ?? 64));
     setSemanticThreshold(String(kb.settings.semantic_threshold ?? 0.72));
+    const weights = (kb.settings.retrieval_weights as Record<string, unknown> | undefined) ?? {};
+    setBm25Weight(String(weights.bm25 ?? 1));
+    setL1Weight(String(weights.l1 ?? 0.8));
+    setOriginalWeight(String(weights.original ?? 1));
+    setSummaryWeight(String(weights.summary ?? 1));
+    setQuestionWeight(String(weights.questions ?? 1));
+    setL3Weight(String(weights.l3 ?? 0.6));
     setEditOpen(true);
   }
 
@@ -97,7 +134,7 @@ export default function KnowledgeBaseDetailPage() {
   if (kbQuery.error) return <ErrorState message={kbQuery.error.message} />;
   const kb = kbQuery.data!;
   const documents = docsQuery.data ?? [];
-  const actionError = deleteDocMutation.error ?? reindexMutation.error;
+  const actionError = deleteDocMutation.error ?? reindexMutation.error ?? rebuildIndexMutation.error;
 
   return (
     <div>
@@ -110,6 +147,16 @@ export default function KnowledgeBaseDetailPage() {
         action={
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => openEdit(kb)} className="btn-secondary"><Pencil className="h-4 w-4" />设置</button>
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm("确认重建该知识库的增强与多向量索引？重建期间现有检索仍可用。")) rebuildIndexMutation.mutate();
+              }}
+              disabled={Boolean(rebuildIndexMutation.isPending || (kb.settings.index_migration && String((kb.settings.index_migration as Record<string, unknown>).status) === "running"))}
+              className="btn-secondary"
+            >
+              <RefreshCw className="h-4 w-4" />重建增强索引
+            </button>
             <Link to={`/upload?kb=${kb.id}`} className="btn-primary"><UploadCloud className="h-4 w-4" />上传文档</Link>
             <Link to={`/search-quality?kb=${kb.id}`} className="btn-secondary"><Search className="h-4 w-4" />检索质检</Link>
             <Link to={`/chat?kb=${kb.id}`} className="btn-secondary"><Bot className="h-4 w-4" />开始问答</Link>
@@ -117,12 +164,14 @@ export default function KnowledgeBaseDetailPage() {
         }
       />
 
-      <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <Metric label="文档数量" value={String(kb.document_count)} />
         <Metric label="Embedding 模型" value={kb.embedding_profile_name ?? "未配置"} />
         <Metric label="召回 / 上下文" value={`${String(kb.settings.candidate_top_k ?? 20)} / ${String(kb.settings.final_top_k ?? 5)}`} />
         <Metric label="重排阈值" value={String(kb.settings.rerank_threshold ?? 0.3)} />
         <Metric label="默认分块模式" value={String(kb.settings.chunk_mode ?? "structure")} />
+        <Metric label="索引版本" value={String(kb.settings.index_version ?? "v1")} />
+        <Metric label="增强状态" value={String((kb.settings.index_migration as Record<string, unknown> | undefined)?.status ?? "未运行")} />
       </div>
 
       {actionError && <div className="mb-4"><ErrorState message={actionError.message} /></div>}
@@ -207,7 +256,7 @@ export default function KnowledgeBaseDetailPage() {
             <label className="label">描述</label>
             <textarea className="input min-h-24" value={description} onChange={(event) => setDescription(event.target.value)} />
           </div>
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-3">
             <div>
               <label className="label">重排序模型</label>
               <select className="input" value={rerankId} onChange={(event) => setRerankId(event.target.value)}>
@@ -220,6 +269,13 @@ export default function KnowledgeBaseDetailPage() {
               <select className="input" value={llmId} onChange={(event) => setLlmId(event.target.value)}>
                 <option value="">请选择</option>
                 {llmModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="label">分块增强模型</label>
+              <select className="input" value={enrichmentId} onChange={(event) => setEnrichmentId(event.target.value)} required>
+                <option value="">请选择</option>
+                {enrichmentModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
               </select>
             </div>
           </div>
@@ -241,13 +297,25 @@ export default function KnowledgeBaseDetailPage() {
             <div><label className="label">重排阈值</label><input className="input" type="number" step="0.01" value={threshold} onChange={(event) => setThreshold(event.target.value)} /></div>
             <div><label className="label">语义切分阈值</label><input className="input" type="number" step="0.01" min={0} max={1} value={semanticThreshold} onChange={(event) => setSemanticThreshold(event.target.value)} /></div>
           </div>
+          <div>
+            <div className="label">检索路由权重</div>
+            <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-6">
+              <div><label className="label">BM25</label><input className="input" type="number" step="0.05" min={0} value={bm25Weight} onChange={(event) => setBm25Weight(event.target.value)} /></div>
+              <div><label className="label">L1 章节摘要</label><input className="input" type="number" step="0.05" min={0} value={l1Weight} onChange={(event) => setL1Weight(event.target.value)} /></div>
+              <div><label className="label">原块向量</label><input className="input" type="number" step="0.05" min={0} value={originalWeight} onChange={(event) => setOriginalWeight(event.target.value)} /></div>
+              <div><label className="label">摘要向量</label><input className="input" type="number" step="0.05" min={0} value={summaryWeight} onChange={(event) => setSummaryWeight(event.target.value)} /></div>
+              <div><label className="label">问题向量</label><input className="input" type="number" step="0.05" min={0} value={questionWeight} onChange={(event) => setQuestionWeight(event.target.value)} /></div>
+              <div><label className="label">L3 原子块</label><input className="input" type="number" step="0.05" min={0} value={l3Weight} onChange={(event) => setL3Weight(event.target.value)} /></div>
+            </div>
+            <p className="mt-1 text-xs text-slate-400">默认等权；权重为 0 表示关闭该召回路由。</p>
+          </div>
           {updateMutation.error && <ErrorState message={updateMutation.error.message} />}
           <div className="rounded-xl bg-amber-50 p-3 text-xs leading-5 text-amber-700">
             Embedding 模型决定向量维度，创建后不可在此处更换。如需更换，请新建知识库并重新入库。
           </div>
           <div className="flex justify-end gap-3">
             <button type="button" className="btn-secondary" onClick={() => setEditOpen(false)}>取消</button>
-            <button type="submit" className="btn-primary" disabled={updateMutation.isPending || !name.trim()}>{updateMutation.isPending ? "保存中..." : "保存设置"}</button>
+            <button type="submit" className="btn-primary" disabled={updateMutation.isPending || !name.trim() || !enrichmentId}>{updateMutation.isPending ? "保存中..." : "保存设置"}</button>
           </div>
         </form>
       </Modal>

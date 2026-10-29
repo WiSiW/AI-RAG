@@ -53,6 +53,18 @@ def test_health_login_and_configuration_flow():
         )
         assert llm.status_code == 201, llm.text
 
+        enrichment = client.post(
+            "/api/v1/model-profiles",
+            headers=headers,
+            json={
+                "name": "测试增强",
+                "kind": "enrichment",
+                "base_url": "https://example.com/v1",
+                "model_name": "enrichment-test",
+            },
+        )
+        assert enrichment.status_code == 201, enrichment.text
+
         kb = client.post(
             "/api/v1/knowledge-bases",
             headers=headers,
@@ -60,11 +72,21 @@ def test_health_login_and_configuration_flow():
                 "name": "测试知识库",
                 "description": "API smoke test",
                 "embedding_profile_id": embedding.json()["id"],
+                "enrichment_profile_id": enrichment.json()["id"],
                 "default_llm_profile_id": llm.json()["id"],
             },
         )
         assert kb.status_code == 201, kb.text
         assert kb.json()["document_count"] == 0
+        assert kb.json()["enrichment_profile_id"] == enrichment.json()["id"]
+        assert set(kb.json()["settings"]["retrieval_weights"]) == {
+            "bm25",
+            "l1",
+            "original",
+            "summary",
+            "questions",
+            "l3",
+        }
 
         listing = client.get("/api/v1/knowledge-bases", headers=headers)
         assert listing.status_code == 200

@@ -692,8 +692,10 @@ def delete_document(
         raise NotFoundError("文档不存在")
     if document.status in {DocumentStatus.PENDING, DocumentStatus.PROCESSING}:
         raise ConflictError("文档正在处理中，暂时无法删除")
-    vector_store.delete_document(document.kb_id, document.id)
-    bm25_store.delete_document(document.kb_id, document.id)
+    vector_store.delete_document(document.kb_id, document.id, index_version="v1")
+    vector_store.delete_document(document.kb_id, document.id, index_version="v2")
+    bm25_store.delete_document(document.kb_id, document.id, index_version="v1")
+    bm25_store.delete_document(document.kb_id, document.id, index_version="v2")
     delete_object(document.object_key)
     db.delete(document)
     db.commit()

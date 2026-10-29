@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api import (
     auth,
     chat,
+    chunk_evaluations,
     conversations,
     documents,
     feedback,
@@ -22,6 +23,7 @@ api_router.include_router(model_profiles.router)
 api_router.include_router(knowledge_bases.router)
 api_router.include_router(documents.router)
 api_router.include_router(chat.router)
+api_router.include_router(chunk_evaluations.router)
 api_router.include_router(conversations.router)
 api_router.include_router(feedback.router)
 api_router.include_router(publications.router)

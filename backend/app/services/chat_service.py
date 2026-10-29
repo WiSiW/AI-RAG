@@ -27,6 +27,11 @@ from app.indexing.model_gateway import ModelGateway
 from app.indexing.types import RetrievedChunk
 from app.indexing.vector_store import MilvusVectorStore
 from app.memory.session_manager import ConversationMemory
+from app.retrieval.context_window import (
+    clip_around_anchor,
+    clip_head_tokens,
+    clip_tail_tokens,
+)
 from app.retrieval.hybrid_retriever import HybridRetriever, Reranker, weighted_rrf_fuse
 from app.schemas import (
     ChatRequest,
@@ -201,6 +206,7 @@ class ChatService:
         rerank_profile_id: str | None = None,
         document_id: str | None = None,
         enforce_context_budget: bool = True,
+        expand_context: bool = False,
     ) -> RetrievalOutcome:
         embedding_profiles: dict[str, ModelProfile] = {}
         for knowledge_base in knowledge_bases:
@@ -227,6 +233,9 @@ class ChatService:
         async def retrieve_one(knowledge_base: KnowledgeBase):
             async with semaphore:
                 kb_settings = knowledge_base.settings or {}
+                index_version = str(kb_settings.get("index_version", "v1"))
+                if index_version not in {"v1", "v2"}:
+                    index_version = "v1"
                 return await self.retriever.retrieve_routes(
                     kb_id=knowledge_base.id,
                     query=query,
@@ -236,6 +245,7 @@ class ChatService:
                         kb_settings.get("candidate_top_k", settings.rag_candidate_top_k)
                     ),
                     document_id=document_id,
+                    index_version=index_version,
                 )
 
         route_results = await asyncio.gather(
@@ -243,6 +253,7 @@ class ChatService:
             return_exceptions=True,
         )
         ranked_lists: list[tuple[list[RetrievedChunk], float]] = []
+        route_names: list[str] = []
         failed_knowledge_base_ids: list[str] = []
         for knowledge_base, result in zip(knowledge_bases, route_results, strict=True):
             if isinstance(result, Exception):
@@ -253,12 +264,21 @@ class ChatService:
                 )
                 failed_knowledge_base_ids.append(knowledge_base.id)
                 continue
-            bm25_results, vector_results = result
-            weight = float((knowledge_base.settings or {}).get("fusion_weight", 1.0))
-            if bm25_results:
-                ranked_lists.append((bm25_results, weight))
-            if vector_results:
-                ranked_lists.append((vector_results, weight))
+            kb_settings = knowledge_base.settings or {}
+            fusion_weight = float(kb_settings.get("fusion_weight", 1.0))
+            retrieval_weights = dict(kb_settings.get("retrieval_weights") or {})
+            for route_name in ("bm25", "l1", "original", "summary", "questions", "l3"):
+                route_results = result.get(route_name) or []
+                if not route_results:
+                    continue
+                default_weight = 0.8 if route_name == "l1" else 0.6 if route_name == "l3" else 1.0
+                route_weight = fusion_weight * float(
+                    retrieval_weights.get(route_name, default_weight)
+                )
+                if route_weight <= 0:
+                    continue
+                ranked_lists.append((route_results, route_weight))
+                route_names.append(route_name)
 
         final_limit = top_k or (
             settings.rag_final_top_k
@@ -269,6 +289,7 @@ class ChatService:
             ranked_lists,
             rrf_k=60,
             top_k=max(settings.rag_global_candidate_top_k, final_limit * max(len(knowledge_bases), 1)),
+            route_names=route_names,
         )
         kb_names = {kb.id: kb.name for kb in knowledge_bases}
         for candidate in candidates:
@@ -291,6 +312,8 @@ class ChatService:
             )
         else:
             result = candidates[:final_limit]
+        if expand_context:
+            result = self._expand_context_windows(db, result)
         if enforce_context_budget:
             result = self._limit_context_tokens(result)
         return RetrievalOutcome(
@@ -303,7 +326,7 @@ class ChatService:
         selected: list[RetrievedChunk] = []
         total = 0
         for chunk in chunks:
-            token_count = count_tokens(chunk.content)
+            token_count = count_tokens(chunk.context_text or chunk.content)
             if selected and total + token_count > settings.rag_multi_kb_max_context_tokens:
                 continue
             selected.append(chunk)
@@ -328,10 +351,138 @@ class ChatService:
             db_metadata = dict(row.metadata_json or {})
             chunk.section = row.section_path
             chunk.metadata = {**db_metadata, **chunk.metadata}
+            chunk.metadata["summary"] = row.summary or ""
+            chunk.metadata["keywords"] = list(row.keywords or [])
+            chunk.metadata["hypothetical_questions"] = list(row.hypothetical_questions or [])
+            chunk.metadata["enrichment_status"] = row.enrichment_status
+            chunk.metadata["enrichment_meta"] = dict(row.enrichment_meta or {})
+            chunk.metadata["granularity_level"] = row.granularity_level
+            chunk.metadata["granule_type"] = row.granule_type
+            chunk.metadata["parent_chunk_id"] = row.parent_chunk_id
+            chunk.metadata["context_prefix"] = row.context_prefix or ""
+            chunk.content = row.content
             parent_content = db_metadata.get("parent_content")
             if parent_content:
                 chunk.metadata["child_content"] = row.content
-                chunk.content = str(parent_content)
+                chunk.metadata["parent_content"] = str(parent_content)
+        return chunks
+
+    @staticmethod
+    def _expand_context_windows(
+        db: Session, chunks: list[RetrievedChunk]
+    ) -> list[RetrievedChunk]:
+        for chunk in chunks:
+            row = db.get(DocumentChunk, chunk.chunk_id)
+            if row is None:
+                chunk.context_text = chunk.content
+                continue
+            anchor_row = row
+            parent_text = str((row.metadata_json or {}).get("parent_content") or "")
+            parent_source = "parent_content" if parent_text else ""
+            if row.granularity_level == "L3" and row.parent_chunk_id:
+                parent_row = db.get(DocumentChunk, row.parent_chunk_id)
+                if parent_row is not None:
+                    anchor_row = parent_row
+                    parent_text = parent_row.content
+                    parent_source = "l3_parent"
+            elif row.granularity_level == "L2" and not parent_text:
+                section_rows = list(
+                    db.scalars(
+                        select(DocumentChunk)
+                        .where(
+                            DocumentChunk.document_id == row.document_id,
+                            DocumentChunk.granularity_level == "L2",
+                            DocumentChunk.section_path == row.section_path,
+                        )
+                        .order_by(DocumentChunk.chunk_index.asc())
+                    )
+                )
+                parent_text = "\n\n".join(item.content for item in section_rows)
+                parent_source = "section" if parent_text else ""
+
+            prefix = row.context_prefix or str(chunk.metadata.get("context_prefix") or "")
+            parts = [prefix] if prefix else []
+            parts.append(f"[命中片段]\n{row.content}")
+            included = {"parent": False, "previous": False, "next": False}
+
+            parent_window = clip_around_anchor(
+                parent_text,
+                row.content,
+                before_tokens=settings.rag_parent_context_tokens,
+                after_tokens=settings.rag_parent_context_tokens,
+            )
+            parent_context = parent_window.replace(row.content, "", 1).strip()
+            if parent_context:
+                base_tokens = count_tokens("\n\n".join(parts))
+                remaining = settings.rag_context_window_max_tokens - base_tokens
+                parent_context = clip_head_tokens(parent_context, remaining)
+                if parent_context:
+                    parts.append(f"[父文档局部上下文]\n{parent_context}")
+                    included["parent"] = True
+
+            previous_row = db.scalar(
+                select(DocumentChunk)
+                .where(
+                    DocumentChunk.document_id == row.document_id,
+                    DocumentChunk.granularity_level == anchor_row.granularity_level,
+                    DocumentChunk.chunk_index < anchor_row.chunk_index,
+                )
+                .order_by(DocumentChunk.chunk_index.desc())
+                .limit(1)
+            )
+            next_row = db.scalar(
+                select(DocumentChunk)
+                .where(
+                    DocumentChunk.document_id == row.document_id,
+                    DocumentChunk.granularity_level == anchor_row.granularity_level,
+                    DocumentChunk.chunk_index > anchor_row.chunk_index,
+                )
+                .order_by(DocumentChunk.chunk_index.asc())
+                .limit(1)
+            )
+            neighbor_texts: list[tuple[str, str, str]] = []
+            for label, neighbor, text, flag in (
+                (
+                    "前一段上下文",
+                    previous_row,
+                    clip_tail_tokens(
+                        previous_row.content if previous_row else "",
+                        settings.rag_neighbor_context_tokens,
+                    ),
+                    "previous",
+                ),
+                (
+                    "后一段上下文",
+                    next_row,
+                    clip_head_tokens(
+                        next_row.content if next_row else "",
+                        settings.rag_neighbor_context_tokens,
+                    ),
+                    "next",
+                ),
+            ):
+                if not neighbor or not text:
+                    continue
+                if neighbor.id == row.id or text.strip() == row.content.strip():
+                    continue
+                if parent_window and neighbor.content in parent_window:
+                    continue
+                neighbor_texts.append((label, text, flag))
+                included[flag] = True
+
+            for label, text, flag in neighbor_texts:
+                candidate = "\n\n".join([*parts, f"[{label}]\n{text}"])
+                if count_tokens(candidate) > settings.rag_context_window_max_tokens:
+                    included[flag] = False
+                    continue
+                parts.append(f"[{label}]\n{text}")
+
+            chunk.context_text = "\n\n".join(parts)
+            chunk.metadata["context_parent_included"] = included["parent"]
+            chunk.metadata["context_parent_source"] = parent_source
+            chunk.metadata["context_previous_included"] = included["previous"]
+            chunk.metadata["context_next_included"] = included["next"]
+            chunk.metadata["context_tokens"] = count_tokens(chunk.context_text)
         return chunks
 
     @staticmethod
@@ -345,6 +496,11 @@ class ChatService:
                 "source": chunk.source,
                 "section": chunk.section,
                 "content": chunk.content,
+                "granularity_level": chunk.metadata.get("granularity_level", "L2"),
+                "granule_type": chunk.metadata.get("granule_type", "paragraph"),
+                "parent_chunk_id": chunk.metadata.get("parent_chunk_id"),
+                "context_prefix": chunk.metadata.get("context_prefix", ""),
+                "context_text": chunk.context_text or chunk.content,
                 "rrf_score": chunk.rrf_score,
                 "rerank_score": chunk.rerank_score,
                 "metadata": chunk.metadata,
@@ -357,7 +513,9 @@ class ChatService:
         return {
             "model": profile.model_name,
             "context_chunks": len(chunks),
-            "context_tokens_estimate": sum(count_tokens(chunk.content) for chunk in chunks),
+            "context_tokens_estimate": sum(
+                count_tokens(chunk.context_text or chunk.content) for chunk in chunks
+            ),
             "answer_tokens_estimate": count_tokens(answer),
         }
 
@@ -392,6 +550,10 @@ class ChatService:
             float(item.rerank_score if item.rerank_score is not None else item.rrf_score)
             for item in results
         ]
+        route_hits: dict[str, int] = {}
+        for item in results:
+            for route in item.metadata.get("matched_representations", []):
+                route_hits[str(route)] = route_hits.get(str(route), 0) + 1
         return SearchQualitySummary(
             result_count=len(results),
             avg_rrf_score=round(sum(item.rrf_score for item in results) / len(results), 8),
@@ -399,6 +561,7 @@ class ChatService:
             reranked_count=sum(1 for item in results if item.rerank_score is not None),
             vector_hits=sum(1 for item in results if item.vector_rank is not None),
             bm25_hits=sum(1 for item in results if item.bm25_rank is not None),
+            route_hits=route_hits,
             queried_knowledge_base_ids=queried_knowledge_base_ids,
             failed_knowledge_base_ids=failed_knowledge_base_ids,
             hits_by_knowledge_base=hits_by_knowledge_base,
@@ -468,6 +631,20 @@ class ChatService:
                     bm25_score=chunk.metadata.get("bm25_score"),
                     vector_rank=chunk.metadata.get("vector_rank"),
                     bm25_rank=chunk.metadata.get("bm25_rank"),
+                    matched_representations=list(
+                        chunk.metadata.get("matched_representations") or []
+                    ),
+                    representation_scores=dict(
+                        chunk.metadata.get("representation_scores") or {}
+                    ),
+                    representation_ranks=dict(
+                        chunk.metadata.get("representation_ranks") or {}
+                    ),
+                    granularity_level=str(chunk.metadata.get("granularity_level", "L2")),
+                    granule_type=str(chunk.metadata.get("granule_type", "paragraph")),
+                    parent_chunk_id=chunk.metadata.get("parent_chunk_id"),
+                    context_prefix=str(chunk.metadata.get("context_prefix", "")),
+                    context_text=chunk.context_text or chunk.content,
                     metadata=chunk.metadata,
                     file_url=file_url,
                     preview_url=preview_url,
@@ -517,6 +694,7 @@ class ChatService:
             rewritten_query,
             rerank_profile_id=request.rerank_profile_id,
             document_id=effective_document_id,
+            expand_context=True,
         )
         chunks = outcome.chunks
         if chunks:
@@ -589,6 +767,7 @@ class ChatService:
             rewritten_query,
             rerank_profile_id=request.rerank_profile_id,
             document_id=effective_document_id,
+            expand_context=True,
         )
         chunks = outcome.chunks
         yield sse_event(

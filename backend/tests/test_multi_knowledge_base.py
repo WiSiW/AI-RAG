@@ -164,8 +164,18 @@ async def test_multi_kb_retrieval_reuses_embedding_query_per_model(monkeypatch):
 
         async def fake_routes(*, kb_id, **kwargs):
             if kb_id == kb_one.id:
-                return [retrieved("one-bm25", kb_id)], [retrieved("one-vector", kb_id)]
-            return [retrieved("two-bm25", kb_id)], [retrieved("two-vector", kb_id)]
+                return {
+                    "bm25": [retrieved("one-bm25", kb_id)],
+                    "original": [retrieved("one-vector", kb_id)],
+                    "summary": [],
+                    "questions": [],
+                }
+            return {
+                "bm25": [retrieved("two-bm25", kb_id)],
+                "original": [retrieved("two-vector", kb_id)],
+                "summary": [],
+                "questions": [],
+            }
 
         monkeypatch.setattr(service.gateway, "embed_texts", fake_embed)
         monkeypatch.setattr(service.retriever, "retrieve_routes", fake_routes)
@@ -246,6 +256,16 @@ def test_conversation_api_returns_all_knowledge_base_names():
                 "model_name": "chat-test",
             },
         ).json()
+        enrichment = client.post(
+            "/api/v1/model-profiles",
+            headers=headers,
+            json={
+                "name": "enrichment",
+                "kind": "enrichment",
+                "base_url": "https://example.com/v1",
+                "model_name": "enrichment-test",
+            },
+        ).json()
         kb_ids = [
             client.post(
                 "/api/v1/knowledge-bases",
@@ -253,6 +273,7 @@ def test_conversation_api_returns_all_knowledge_base_names():
                 json={
                     "name": name,
                     "embedding_profile_id": embedding["id"],
+                    "enrichment_profile_id": enrichment["id"],
                     "default_llm_profile_id": llm["id"],
                 },
             ).json()["id"]

@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     rag_multi_kb_rerank_threshold: float = 0.3
     rag_multi_kb_max_context_tokens: int = 6000
     rag_max_concurrency: int = 8
+    rag_parent_context_tokens: int = 320
+    rag_neighbor_context_tokens: int = 180
+    rag_context_window_max_tokens: int = 1200
+    rag_context_prefix_summary_chars: int = 120
+    enrichment_batch_size: int = 8
+    enrichment_max_tokens: int = 4096
 
     @property
     def cors_origin_list(self) -> list[str]:

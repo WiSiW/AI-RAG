@@ -1,6 +1,6 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, BrainCircuit, Braces, Cpu, Database, LoaderCircle, Pencil, Plus, Trash2 } from "lucide-react";
+import { Activity, BrainCircuit, Braces, Cpu, Database, LoaderCircle, Pencil, Plus, Sparkles, Trash2 } from "lucide-react";
 import { api } from "../api/client";
 import { EmptyState, ErrorState, LoadingState, Modal, PageHeader } from "../components/UI";
 import type { ModelKind, ModelProfile, ModelTestResult } from "../types";
@@ -33,6 +33,7 @@ const kindMeta: Record<ModelKind, { label: string; description: string; icon: ty
   embedding: { label: "Embedding", description: "文档与查询向量化", icon: Database, className: "bg-cyan-50 text-cyan-700" },
   rerank: { label: "Rerank", description: "候选分块语义重排", icon: Activity, className: "bg-amber-50 text-amber-700" },
   llm: { label: "问答模型", description: "查询改写、摘要与回答生成", icon: BrainCircuit, className: "bg-violet-50 text-violet-700" },
+  enrichment: { label: "增强模型", description: "分块关键词、摘要与假设问题生成", icon: Sparkles, className: "bg-emerald-50 text-emerald-700" },
 };
 
 export default function ModelsPage() {
@@ -48,6 +49,7 @@ export default function ModelsPage() {
     embedding: models.filter((item) => item.kind === "embedding"),
     rerank: models.filter((item) => item.kind === "rerank"),
     llm: models.filter((item) => item.kind === "llm"),
+    enrichment: models.filter((item) => item.kind === "enrichment"),
   }), [models]);
 
   const saveMutation = useMutation({
@@ -129,7 +131,7 @@ export default function ModelsPage() {
     <div>
       <PageHeader
         title="模型配置"
-        description="统一配置 OpenAI-compatible 问答与 Embedding API、Rerank HTTP API；已保存模型可随时编辑。"
+        description="统一配置 OpenAI-compatible 问答、增强与 Embedding API、Rerank HTTP API；已保存模型可随时编辑。"
         action={<button type="button" onClick={openCreate} className="btn-primary"><Plus className="h-4 w-4" />添加模型</button>}
       />
 
@@ -139,7 +141,7 @@ export default function ModelsPage() {
 
       {!models.length ? (
         <div className="panel">
-          <EmptyState title="尚未配置模型" description="至少需要 Embedding 和问答模型；重排序模型可按知识库选用。" action={<button type="button" onClick={openCreate} className="btn-primary"><Plus className="h-4 w-4" />添加模型</button>} />
+          <EmptyState title="尚未配置模型" description="至少需要 Embedding、增强和问答模型；重排序模型可按知识库选用。" action={<button type="button" onClick={openCreate} className="btn-primary"><Plus className="h-4 w-4" />添加模型</button>} />
         </div>
       ) : (
         <div className="space-y-8">
@@ -187,6 +189,7 @@ export default function ModelsPage() {
                 <option value="embedding">Embedding</option>
                 <option value="rerank">Rerank</option>
                 <option value="llm">问答模型</option>
+                <option value="enrichment">增强模型</option>
               </select>
             </div>
             <div><label className="label">显示名称</label><input className="input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required /></div>

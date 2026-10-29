@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-ModelKindValue = Literal["embedding", "rerank", "llm"]
+ModelKindValue = Literal["embedding", "rerank", "llm", "enrichment"]
 ChunkModeValue = Literal[
     "structure",
     "recursive",
@@ -14,6 +14,7 @@ ChunkModeValue = Literal[
     "parent_child",
 ]
 PublicationKindValue = Literal["qa", "search"]
+EvaluationGranularityValue = Literal["L1", "L2", "L3"]
 
 
 def _normalize_scope(
@@ -96,6 +97,7 @@ class KnowledgeBaseCreate(BaseModel):
     description: str = ""
     embedding_profile_id: str
     rerank_profile_id: str | None = None
+    enrichment_profile_id: str
     default_llm_profile_id: str | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
 
@@ -104,6 +106,7 @@ class KnowledgeBaseUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = None
     rerank_profile_id: str | None = None
+    enrichment_profile_id: str | None = None
     default_llm_profile_id: str | None = None
     settings: dict[str, Any] | None = None
 
@@ -114,6 +117,7 @@ class KnowledgeBaseRead(ORMModel):
     description: str
     embedding_profile_id: str
     rerank_profile_id: str | None
+    enrichment_profile_id: str | None
     default_llm_profile_id: str | None
     settings: dict[str, Any]
     created_at: datetime
@@ -153,6 +157,15 @@ class ChunkRead(ORMModel):
     section_path: str
     token_count: int
     metadata_json: dict[str, Any]
+    granularity_level: str = "L2"
+    granule_type: str = "paragraph"
+    parent_chunk_id: str | None = None
+    context_prefix: str = ""
+    summary: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    hypothetical_questions: list[str] = Field(default_factory=list)
+    enrichment_status: str = "pending"
+    enrichment_meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class IngestionJobRead(ORMModel):
@@ -165,6 +178,84 @@ class IngestionJobRead(ORMModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class ChunkEvaluationCreate(BaseModel):
+    document_id: str | None = None
+    knowledge_base_id: str | None = None
+    granularities: list[EvaluationGranularityValue] = Field(
+        default_factory=lambda: ["L1", "L2", "L3"]
+    )
+    judge_profile_id: str | None = None
+    llm_enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "ChunkEvaluationCreate":
+        if bool(self.document_id) == bool(self.knowledge_base_id):
+            raise ValueError("document_id 与 knowledge_base_id 必须且只能提供一个")
+        self.granularities = list(dict.fromkeys(self.granularities)) or ["L1", "L2", "L3"]
+        return self
+
+
+class ChunkEvaluationRunRead(ORMModel):
+    id: str
+    scope_type: str
+    knowledge_base_id: str | None
+    document_id: str | None
+    granularities: list[str]
+    judge_profile_id: str | None
+    llm_enabled: bool
+    status: str
+    progress: dict[str, Any]
+    config_snapshot: dict[str, Any]
+    aggregate: dict[str, Any]
+    errors: list[Any]
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class ChunkEvaluationResultRead(ORMModel):
+    id: str
+    run_id: str
+    chunk_id: str | None
+    document_id: str | None
+    kb_id: str | None
+    granularity_level: str
+    granule_type: str
+    chunk_index: int
+    content_snapshot: str
+    section_path: str
+    context_prefix: str
+    parent_chunk_id: str | None
+    metadata_snapshot: dict[str, Any]
+    context_snapshot: dict[str, Any]
+    rule_metrics: dict[str, Any]
+    llm_scores: dict[str, Any]
+    llm_reason: str
+    issue_codes: list[str]
+    suggestions: list[str]
+    composite_score: float
+    grade: str
+    review_sample: bool
+    human_score: int | None
+    human_issue_codes: list[str]
+    human_comment: str
+    reviewed_at: datetime | None
+    created_at: datetime
+
+
+class ChunkEvaluationResultsPage(BaseModel):
+    items: list[ChunkEvaluationResultRead]
+    total: int
+    page: int
+    page_size: int
+
+
+class ChunkEvaluationReviewUpdate(BaseModel):
+    human_score: int = Field(ge=1, le=5)
+    human_issue_codes: list[str] = Field(default_factory=list)
+    human_comment: str = Field(default="", max_length=4000)
 
 
 class UploadResponse(BaseModel):
@@ -247,6 +338,14 @@ class SearchResult(BaseModel):
     bm25_score: float | None = None
     vector_rank: int | None = None
     bm25_rank: int | None = None
+    matched_representations: list[str] = Field(default_factory=list)
+    representation_scores: dict[str, float] = Field(default_factory=dict)
+    representation_ranks: dict[str, int] = Field(default_factory=dict)
+    granularity_level: str = "L2"
+    granule_type: str = "paragraph"
+    parent_chunk_id: str | None = None
+    context_prefix: str = ""
+    context_text: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     file_url: str | None = None
     preview_url: str | None = None
@@ -259,6 +358,7 @@ class SearchQualitySummary(BaseModel):
     reranked_count: int = 0
     vector_hits: int = 0
     bm25_hits: int = 0
+    route_hits: dict[str, int] = Field(default_factory=dict)
     queried_knowledge_base_ids: list[str] = Field(default_factory=list)
     failed_knowledge_base_ids: list[str] = Field(default_factory=list)
     hits_by_knowledge_base: dict[str, int] = Field(default_factory=dict)

@@ -1,7 +1,7 @@
 import { Children, cloneElement, isValidElement, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Bot, FileText, Hash, Layers3, Search, X } from "lucide-react";
+import { ArrowLeft, Bot, ClipboardCheck, FileText, Hash, Layers3, Search, Sparkles, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { Link, useParams, useSearchParams } from "react-router-dom";
@@ -31,7 +31,7 @@ export default function DocumentPreviewPage() {
   );
   const matchCount = useMemo(
     () => filteredChunks.reduce(
-      (total, chunk) => total + countOccurrences(`${chunk.section_path}\n${chunk.content}`, searchTerms),
+      (total, chunk) => total + countOccurrences(chunkSearchText(chunk), searchTerms),
       0,
     ),
     [filteredChunks, searchTerms],
@@ -91,6 +91,7 @@ export default function DocumentPreviewPage() {
         action={
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge status={document.status} />
+            <Link to={`/chunk-evaluations?kb=${document.kb_id}&document=${document.id}`} className="btn-secondary"><ClipboardCheck className="h-4 w-4" />评估完整性</Link>
             <Link to={`/chat?kb=${document.kb_id}&document=${document.id}`} className="btn-secondary"><Bot className="h-4 w-4" />针对本文档问答</Link>
           </div>
         }
@@ -186,11 +187,34 @@ export default function DocumentPreviewPage() {
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2 text-xs">
-                        <span className="font-semibold text-slate-700">#{chunk.chunk_index + 1}</span>
+                        <span className="flex items-center gap-2 font-semibold text-slate-700">
+                          #{chunk.chunk_index + 1}
+                          <span className={`chip text-[10px] ${chunk.granularity_level === "L1" ? "bg-violet-50 text-violet-700" : chunk.granularity_level === "L3" ? "bg-amber-50 text-amber-700" : "bg-brand-50 text-brand-700"}`}>{chunk.granularity_level}</span>
+                          <span className="text-[10px] font-normal text-slate-400">{chunk.granule_type}</span>
+                        </span>
                         <span className="flex items-center gap-1 text-slate-400"><Hash className="h-3 w-3" />{chunk.token_count}</span>
                       </div>
                       <div className="mt-1 truncate text-xs text-brand-700"><HighlightText text={chunk.section_path} terms={searchTerms} /></div>
+                      {chunk.context_prefix && <div className="mt-1 text-[11px] leading-5 text-slate-400">{chunk.context_prefix}</div>}
                       <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-slate-600"><HighlightText text={chunk.content} terms={searchTerms} /></p>
+                      {chunk.summary && chunk.granularity_level !== "L1" && (
+                        <div className="mt-2 rounded-lg bg-emerald-50 px-2.5 py-2 text-xs leading-5 text-emerald-800">
+                          <span className="mr-1 font-semibold">摘要</span>{chunk.summary}
+                        </div>
+                      )}
+                      {!!chunk.keywords?.length && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {chunk.keywords.map((keyword) => <span key={keyword} className="chip bg-slate-100 text-[11px] text-slate-600">{keyword}</span>)}
+                        </div>
+                      )}
+                      {!!chunk.hypothetical_questions?.length && (
+                        <div className="mt-2 space-y-1 text-xs text-slate-500">
+                          {chunk.hypothetical_questions.map((question) => <div key={question}><Sparkles className="mr-1 inline h-3 w-3 text-brand-500" />{question}</div>)}
+                        </div>
+                      )}
+                      {chunk.enrichment_status !== "ready" && (
+                        <div className="mt-2 text-[11px] font-medium text-amber-700">增强状态：{chunk.enrichment_status}</div>
+                      )}
                     </Link>
                   );
                 })}
@@ -238,8 +262,20 @@ function toSearchTerms(query: string): string[] {
 
 function chunkMatches(chunk: Chunk, terms: string[]): boolean {
   if (!terms.length) return true;
-  const haystack = `${chunk.section_path}\n${chunk.content}`.toLocaleLowerCase();
+  const haystack = chunkSearchText(chunk).toLocaleLowerCase();
   return terms.every((term) => haystack.includes(term));
+}
+
+function chunkSearchText(chunk: Chunk): string {
+  return [
+    chunk.section_path,
+    chunk.content,
+    chunk.granularity_level,
+    chunk.granule_type,
+    chunk.summary,
+    ...(chunk.keywords ?? []),
+    ...(chunk.hypothetical_questions ?? []),
+  ].join("\n");
 }
 
 function countOccurrences(text: string, terms: string[]): number {

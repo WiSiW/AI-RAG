@@ -21,6 +21,15 @@ function relevanceSourceLabel(item: SearchResult): string {
   return source === "rerank" ? "Rerank 精排" : "RRF 融合";
 }
 
+const routeLabels: Record<string, string> = {
+  bm25: "BM25",
+  l1: "L1 章节摘要",
+  original: "原块向量",
+  summary: "摘要向量",
+  questions: "问题向量",
+  l3: "L3 原子块",
+};
+
 export default function SearchQualityPage() {
   const [searchParams] = useSearchParams();
   const initialKbIds = (searchParams.get("kbs") ?? searchParams.get("kb") ?? "")
@@ -113,6 +122,11 @@ export default function SearchQualityPage() {
           </div>
 
           <div className="flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-white p-3 text-xs">
+            {Object.entries(response.quality.route_hits ?? {}).map(([route, hits]) => (
+              <span key={route} className="chip bg-emerald-50 text-emerald-700">
+                {routeLabels[route] ?? route} · {hits} 条
+              </span>
+            ))}
             {Object.entries(response.quality.hits_by_knowledge_base).map(([kbId, hits]) => (
               <span key={kbId} className="chip bg-slate-50 text-slate-600">
                 {knowledgeBases.find((knowledgeBase) => knowledgeBase.id === kbId)?.name ?? kbId} · {hits} 条
@@ -141,6 +155,13 @@ export default function SearchQualityPage() {
                     </div>
                     {item.knowledge_base_name && <div className="mt-1"><span className="chip bg-brand-50 text-[11px] text-brand-700">{item.knowledge_base_name}</span></div>}
                     <div className="mt-1 text-xs text-slate-500">{item.section}</div>
+                    {item.context_prefix && <div className="mt-1 text-[11px] leading-5 text-slate-400">{item.context_prefix}</div>}
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      <span className="chip bg-violet-50 text-[11px] text-violet-700">{item.granularity_level} · {item.granule_type}</span>
+                      {(item.matched_representations ?? []).map((route) => (
+                        <span key={route} className="chip bg-emerald-50 text-[11px] text-emerald-700">{routeLabels[route] ?? route}</span>
+                      ))}
+                    </div>
                   </div>
                   <button type="button" onClick={() => setSelected(item)} className="btn-secondary px-3 py-2 text-xs"><ExternalLink className="h-4 w-4" />查看原文与分块</button>
                 </div>
@@ -165,6 +186,15 @@ export default function SearchQualityPage() {
                   <Score label="向量排名" value={item.vector_rank} integer />
                   <Score label="BM25 排名" value={item.bm25_rank} integer />
                 </div>
+                {!!Object.keys(item.representation_scores ?? {}).length && (
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500">
+                    {Object.entries(item.representation_scores).map(([route, value]) => (
+                      <span key={route} className="rounded-md bg-slate-50 px-2 py-1">
+                        {routeLabels[route] ?? route}：{value.toFixed(4)}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </article>
             ))}
             {!response.results.length && <div className="panel p-10 text-center text-sm text-slate-400"><BarChart3 className="mx-auto mb-3 h-7 w-7" />没有召回结果，请检查文档入库状态、阈值和 Embedding 模型。</div>}

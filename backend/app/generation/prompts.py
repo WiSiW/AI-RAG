@@ -45,10 +45,15 @@ def build_context_prompt(documents: list[RetrievedChunk]) -> str:
         knowledge_base_name = document.metadata.get("kb_name", "") or document.kb_id
         source_line = (
             f"[{index}] 知识库：{knowledge_base_name} | 来源：{document.source} "
-            f"| 章节：{document.section}"
+            f"| 章节：{document.section} "
+            f"| 粒度：{document.metadata.get('granularity_level', 'L2')}"
         )
+        context_body = document.context_text or document.content
+        context_prefix = str(document.metadata.get("context_prefix", "") or "")
+        if context_prefix and not context_body.startswith(context_prefix):
+            context_body = f"{context_prefix}\n{context_body}"
         parts.append(
-            f"{source_line}\n{document.content}"
+            f"{source_line}\n{context_body}"
         )
     return "\n\n".join(parts) if parts else "（无可用参考资料）"
 

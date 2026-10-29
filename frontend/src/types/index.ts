@@ -1,4 +1,4 @@
-export type ModelKind = "embedding" | "rerank" | "llm";
+export type ModelKind = "embedding" | "rerank" | "llm" | "enrichment";
 export type ChunkMode =
   | "structure"
   | "recursive"
@@ -36,6 +36,7 @@ export interface KnowledgeBase {
   description: string;
   embedding_profile_id: string;
   rerank_profile_id: string | null;
+  enrichment_profile_id: string | null;
   default_llm_profile_id: string | null;
   settings: Record<string, unknown>;
   created_at: string;
@@ -75,6 +76,15 @@ export interface Chunk {
   section_path: string;
   token_count: number;
   metadata_json: Record<string, unknown>;
+  granularity_level: "L1" | "L2" | "L3" | string;
+  granule_type: string;
+  parent_chunk_id: string | null;
+  context_prefix: string;
+  summary: string;
+  keywords: string[];
+  hypothetical_questions: string[];
+  enrichment_status: "pending" | "ready" | "degraded" | string;
+  enrichment_meta: Record<string, unknown>;
 }
 
 export interface IngestionJob {
@@ -185,6 +195,14 @@ export interface SearchResult {
   bm25_score: number | null;
   vector_rank: number | null;
   bm25_rank: number | null;
+  matched_representations: string[];
+  representation_scores: Record<string, number>;
+  representation_ranks: Record<string, number>;
+  granularity_level: "L1" | "L2" | "L3" | string;
+  granule_type: string;
+  parent_chunk_id: string | null;
+  context_prefix: string;
+  context_text: string;
   metadata: Record<string, unknown>;
   file_url: string | null;
   preview_url: string | null;
@@ -197,6 +215,7 @@ export interface SearchQuality {
   reranked_count: number;
   vector_hits: number;
   bm25_hits: number;
+  route_hits: Record<string, number>;
   queried_knowledge_base_ids: string[];
   failed_knowledge_base_ids: string[];
   hits_by_knowledge_base: Record<string, number>;
@@ -207,6 +226,63 @@ export interface SearchResponse {
   rewritten_query: string | null;
   results: SearchResult[];
   quality: SearchQuality;
+}
+
+export type EvaluationStatus = "queued" | "running" | "partial" | "completed" | "failed";
+
+export interface ChunkEvaluationRun {
+  id: string;
+  scope_type: "document" | "knowledge_base";
+  knowledge_base_id: string | null;
+  document_id: string | null;
+  granularities: string[];
+  judge_profile_id: string | null;
+  llm_enabled: boolean;
+  status: EvaluationStatus;
+  progress: Record<string, unknown>;
+  config_snapshot: Record<string, unknown>;
+  aggregate: Record<string, unknown>;
+  errors: Array<Record<string, unknown>>;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface ChunkEvaluationResult {
+  id: string;
+  run_id: string;
+  chunk_id: string | null;
+  document_id: string | null;
+  kb_id: string | null;
+  granularity_level: string;
+  granule_type: string;
+  chunk_index: number;
+  content_snapshot: string;
+  section_path: string;
+  context_prefix: string;
+  parent_chunk_id: string | null;
+  metadata_snapshot: Record<string, unknown>;
+  context_snapshot: Record<string, unknown>;
+  rule_metrics: Record<string, unknown>;
+  llm_scores: Record<string, unknown>;
+  llm_reason: string;
+  issue_codes: string[];
+  suggestions: string[];
+  composite_score: number;
+  grade: "pass" | "warn" | "fail" | string;
+  review_sample: boolean;
+  human_score: number | null;
+  human_issue_codes: string[];
+  human_comment: string;
+  reviewed_at: string | null;
+  created_at: string;
+}
+
+export interface ChunkEvaluationResultsPage {
+  items: ChunkEvaluationResult[];
+  total: number;
+  page: number;
+  page_size: number;
 }
 
 export interface ChunkModeCapability {

@@ -10,6 +10,7 @@ interface FormState {
   description: string;
   embeddingProfileId: string;
   rerankProfileId: string;
+  enrichmentProfileId: string;
   llmProfileId: string;
   candidateTopK: string;
   finalTopK: string;
@@ -25,6 +26,7 @@ const initialForm: FormState = {
   description: "",
   embeddingProfileId: "",
   rerankProfileId: "",
+  enrichmentProfileId: "",
   llmProfileId: "",
   candidateTopK: "20",
   finalTopK: "5",
@@ -46,6 +48,7 @@ export default function KnowledgeBasesPage() {
   const models = modelQuery.data ?? [];
   const embeddingModels = useMemo(() => models.filter((item) => item.kind === "embedding" && item.is_active), [models]);
   const rerankModels = useMemo(() => models.filter((item) => item.kind === "rerank" && item.is_active), [models]);
+  const enrichmentModels = useMemo(() => models.filter((item) => item.kind === "enrichment" && item.is_active), [models]);
   const llmModels = useMemo(() => models.filter((item) => item.kind === "llm" && item.is_active), [models]);
 
   const createMutation = useMutation({
@@ -55,6 +58,7 @@ export default function KnowledgeBasesPage() {
         description: form.description.trim(),
         embedding_profile_id: form.embeddingProfileId,
         rerank_profile_id: form.rerankProfileId || null,
+        enrichment_profile_id: form.enrichmentProfileId,
         default_llm_profile_id: form.llmProfileId || null,
         settings: {
           candidate_top_k: Number(form.candidateTopK),
@@ -83,6 +87,7 @@ export default function KnowledgeBasesPage() {
       ...initialForm,
       embeddingProfileId: embeddingModels[0]?.id ?? "",
       rerankProfileId: rerankModels[0]?.id ?? "",
+      enrichmentProfileId: enrichmentModels[0]?.id ?? "",
       llmProfileId: llmModels[0]?.id ?? "",
     });
     setOpen(true);
@@ -90,7 +95,7 @@ export default function KnowledgeBasesPage() {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!form.embeddingProfileId) return;
+    if (!form.embeddingProfileId || !form.enrichmentProfileId) return;
     createMutation.mutate();
   }
 
@@ -104,7 +109,7 @@ export default function KnowledgeBasesPage() {
     <div>
       <PageHeader
         title="知识库"
-        description="知识库绑定固定的 Embedding 模型，并统一管理文档、检索参数与默认问答模型。"
+        description="知识库绑定固定的 Embedding、增强与默认问答模型，并统一管理文档和检索参数。"
         action={
           <button type="button" onClick={openCreate} className="btn-primary">
             <Plus className="h-4 w-4" />
@@ -175,6 +180,9 @@ export default function KnowledgeBasesPage() {
           {!embeddingModels.length && (
             <ErrorState message="尚未配置可用的 Embedding 模型，请先前往“模型配置”创建。" />
           )}
+          {!enrichmentModels.length && (
+            <ErrorState message="尚未配置可用的增强模型，请先前往“模型配置”创建。" />
+          )}
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
               <label className="label">名称</label>
@@ -192,7 +200,7 @@ export default function KnowledgeBasesPage() {
             <label className="label">描述</label>
             <textarea className="input min-h-24 resize-y" value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
           </div>
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-3">
             <div>
               <label className="label">重排序模型</label>
               <select className="input" value={form.rerankProfileId} onChange={(event) => setForm({ ...form, rerankProfileId: event.target.value })}>
@@ -205,6 +213,13 @@ export default function KnowledgeBasesPage() {
               <select className="input" value={form.llmProfileId} onChange={(event) => setForm({ ...form, llmProfileId: event.target.value })}>
                 <option value="">请选择</option>
                 {llmModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="label">分块增强模型</label>
+              <select className="input" value={form.enrichmentProfileId} onChange={(event) => setForm({ ...form, enrichmentProfileId: event.target.value })} required>
+                <option value="">请选择</option>
+                {enrichmentModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
               </select>
             </div>
           </div>
@@ -239,7 +254,7 @@ export default function KnowledgeBasesPage() {
           </div>
           <div className="flex justify-end gap-3">
             <button type="button" onClick={() => setOpen(false)} className="btn-secondary">取消</button>
-            <button type="submit" disabled={createMutation.isPending || !embeddingModels.length} className="btn-primary">
+            <button type="submit" disabled={createMutation.isPending || !embeddingModels.length || !enrichmentModels.length} className="btn-primary">
               {createMutation.isPending ? "创建中..." : "创建知识库"}
             </button>
           </div>

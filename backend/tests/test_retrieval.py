@@ -6,7 +6,7 @@ from whoosh.fields import ID, STORED, TEXT, Schema
 
 from app.indexing.bm25_store import BM25Store, ChineseTokenizer
 from app.indexing.types import IndexedChunk, RetrievedChunk
-from app.retrieval.hybrid_retriever import rrf_fuse
+from app.retrieval.hybrid_retriever import rrf_fuse, weighted_rrf_fuse
 from app.services.chat_service import resolve_search_relevance
 
 
@@ -101,3 +101,64 @@ def test_bm25_search_supports_legacy_index_with_stored_section():
         results = BM25Store(temp_dir).search("kb", "糖尿病 血糖", 10)
 
         assert [item.chunk_id for item in results] == ["c1"]
+
+
+def test_bm25_v2_retrieves_keyword_only_match():
+    with TemporaryDirectory(dir=Path(__file__).parent) as temp_dir:
+        store = BM25Store(temp_dir)
+        store.add_chunks(
+            "kb-v2",
+            [
+                IndexedChunk(
+                    chunk_id="c1",
+                    document_id="d1",
+                    kb_id="kb-v2",
+                    content="这段正文故意不包含目标词。",
+                    section="健康",
+                    keywords=["糖尿病", "血糖"],
+                    metadata={"source": "demo.md"},
+                )
+            ],
+            index_version="v2",
+        )
+
+        results = store.search("kb-v2", "糖尿病", 10, index_version="v2")
+
+        assert [item.chunk_id for item in results] == ["c1"]
+        assert results[0].metadata["bm25_score"] > 0
+
+
+def test_weighted_rrf_preserves_representation_route_metadata():
+    bm25 = chunk("a")
+    original = chunk("a")
+    summary = chunk("b")
+    questions = chunk("a")
+    original.metadata["vector_score"] = 0.91
+    summary.metadata["vector_score"] = 0.88
+    questions.metadata["vector_score"] = 0.84
+    for item, route in (
+        (bm25, "bm25"),
+        (original, "original"),
+        (summary, "summary"),
+        (questions, "questions"),
+    ):
+        item.metadata["matched_representations"] = [route]
+        item.metadata["representation_scores"] = {route: 1.0}
+
+    result = weighted_rrf_fuse(
+        [([bm25], 1.0), ([original], 1.0), ([summary], 1.0), ([questions], 1.0)],
+        top_k=2,
+        route_names=["bm25", "original", "summary", "questions"],
+    )
+
+    assert [item.chunk_id for item in result] == ["a", "b"]
+    assert set(result[0].metadata["matched_representations"]) == {
+        "bm25",
+        "original",
+        "questions",
+    }
+    assert set(result[0].metadata["representation_scores"]) == {
+        "bm25",
+        "original",
+        "questions",
+    }

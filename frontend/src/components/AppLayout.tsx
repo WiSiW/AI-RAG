@@ -1,6 +1,7 @@
 import {
   Bot,
   Boxes,
+  ClipboardCheck,
   Database,
   History,
   Code2,
@@ -20,6 +21,7 @@ const navItems = [
   { to: "/history", label: "历史问答", icon: History },
   { to: "/models", label: "模型配置", icon: Settings2 },
   { to: "/search-quality", label: "检索质检", icon: Search },
+  { to: "/chunk-evaluations", label: "分块评估", icon: ClipboardCheck },
   { to: "/api-publishing", label: "API 发布", icon: Code2 },
 ];
 
@@ -30,6 +32,7 @@ const pageTitles: Record<string, string> = {
   "/history": "历史问答",
   "/models": "模型配置",
   "/search-quality": "检索质检",
+  "/chunk-evaluations": "分块评估",
   "/api-publishing": "API 发布",
 };
 

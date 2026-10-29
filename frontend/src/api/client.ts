@@ -3,6 +3,8 @@ import type {
   Capabilities,
   ChatResponse,
   Chunk,
+  ChunkEvaluationResultsPage,
+  ChunkEvaluationRun,
   Conversation,
   ConversationDetail,
   DocumentContent,
@@ -112,6 +114,10 @@ export const api = {
     }),
   deleteKnowledgeBase: (id: string) =>
     request<void>(`/knowledge-bases/${id}`, { method: "DELETE" }),
+  rebuildKnowledgeBaseIndex: (id: string) =>
+    request<{ task_id: string; status: string }>(`/knowledge-bases/${id}/rebuild-index`, {
+      method: "POST",
+    }),
 
   getCapabilities: () => request<Capabilities>("/system/capabilities"),
 
@@ -127,6 +133,59 @@ export const api = {
   reindexDocument: (id: string) =>
     request<IngestionJob>(`/documents/${id}/reindex`, { method: "POST" }),
   getJob: (id: string) => request<IngestionJob>(`/ingestion-jobs/${id}`),
+  createChunkEvaluation: (payload: Record<string, unknown>) =>
+    request<ChunkEvaluationRun>("/chunk-evaluations", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  listChunkEvaluations: (params: {
+    documentId?: string;
+    knowledgeBaseId?: string;
+    status?: string;
+  } = {}) => {
+    const query = new URLSearchParams();
+    if (params.documentId) query.set("document_id", params.documentId);
+    if (params.knowledgeBaseId) query.set("knowledge_base_id", params.knowledgeBaseId);
+    if (params.status) query.set("status", params.status);
+    return request<ChunkEvaluationRun[]>(`/chunk-evaluations?${query.toString()}`);
+  },
+  getChunkEvaluation: (id: string) =>
+    request<ChunkEvaluationRun>(`/chunk-evaluations/${id}`),
+  listChunkEvaluationResults: (
+    id: string,
+    params: {
+      granularity?: string;
+      grade?: string;
+      issue?: string;
+      reviewSample?: boolean;
+      page?: number;
+      pageSize?: number;
+    } = {},
+  ) => {
+    const query = new URLSearchParams();
+    if (params.granularity) query.set("granularity", params.granularity);
+    if (params.grade) query.set("grade", params.grade);
+    if (params.issue) query.set("issue", params.issue);
+    if (params.reviewSample !== undefined) query.set("review_sample", String(params.reviewSample));
+    query.set("page", String(params.page ?? 1));
+    query.set("page_size", String(params.pageSize ?? 20));
+    return request<ChunkEvaluationResultsPage>(`/chunk-evaluations/${id}/results?${query.toString()}`);
+  },
+  reviewChunkEvaluationResult: (
+    runId: string,
+    resultId: string,
+    payload: Record<string, unknown>,
+  ) =>
+    request<ChunkEvaluationRun>(`/chunk-evaluations/${runId}/results/${resultId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  compareChunkEvaluations: (runIds: string[]) =>
+    request<Record<string, unknown>>(
+      `/chunk-evaluations/compare?run_ids=${encodeURIComponent(runIds.join(","))}`,
+    ),
+  deleteChunkEvaluation: (id: string) =>
+    request<void>(`/chunk-evaluations/${id}`, { method: "DELETE" }),
   uploadDocument: async (
     kbId: string,
     file: File,

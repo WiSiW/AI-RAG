@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -15,6 +15,7 @@ class ModelKind(StrEnum):
     EMBEDDING = "embedding"
     RERANK = "rerank"
     LLM = "llm"
+    ENRICHMENT = "enrichment"
 
 
 class DocumentStatus(StrEnum):
@@ -28,6 +29,14 @@ class JobStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class EvaluationStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    PARTIAL = "partial"
+    COMPLETED = "completed"
     FAILED = "failed"
 
 
@@ -60,6 +69,9 @@ class KnowledgeBase(Base):
     rerank_profile_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_profiles.id"), nullable=True
     )
+    enrichment_profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_profiles.id"), nullable=True
+    )
     default_llm_profile_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_profiles.id"), nullable=True
     )
@@ -71,6 +83,7 @@ class KnowledgeBase(Base):
 
     embedding_profile = relationship("ModelProfile", foreign_keys=[embedding_profile_id])
     rerank_profile = relationship("ModelProfile", foreign_keys=[rerank_profile_id])
+    enrichment_profile = relationship("ModelProfile", foreign_keys=[enrichment_profile_id])
     default_llm_profile = relationship("ModelProfile", foreign_keys=[default_llm_profile_id])
 
 
@@ -117,6 +130,17 @@ class DocumentChunk(Base):
     section_path: Mapped[str] = mapped_column(String(1000), default="正文")
     token_count: Mapped[int] = mapped_column(Integer, default=0)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    granularity_level: Mapped[str] = mapped_column(String(2), default="L2", index=True)
+    granule_type: Mapped[str] = mapped_column(String(40), default="paragraph")
+    parent_chunk_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    context_prefix: Mapped[str] = mapped_column(Text, default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    keywords: Mapped[list] = mapped_column(JSON, default=list)
+    hypothetical_questions: Mapped[list] = mapped_column(JSON, default=list)
+    enrichment_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    enrichment_meta: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     document = relationship("Document", back_populates="chunks")
@@ -138,6 +162,70 @@ class IngestionJob(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     document = relationship("Document", back_populates="jobs")
+
+
+class ChunkEvaluationRun(Base):
+    __tablename__ = "chunk_evaluation_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope_type: Mapped[str] = mapped_column(String(20), index=True)
+    knowledge_base_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    document_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    granularities: Mapped[list] = mapped_column(JSON, default=list)
+    judge_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    llm_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(
+        String(20), default=EvaluationStatus.QUEUED, index=True
+    )
+    progress: Mapped[dict] = mapped_column(JSON, default=dict)
+    config_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    aggregate: Mapped[dict] = mapped_column(JSON, default=dict)
+    errors: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    results = relationship(
+        "ChunkEvaluationResult",
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+
+
+class ChunkEvaluationResult(Base):
+    __tablename__ = "chunk_evaluation_results"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("chunk_evaluation_runs.id", ondelete="CASCADE"), index=True
+    )
+    chunk_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    document_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    kb_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    granularity_level: Mapped[str] = mapped_column(String(2), index=True)
+    granule_type: Mapped[str] = mapped_column(String(40), default="paragraph")
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+    content_snapshot: Mapped[str] = mapped_column(Text)
+    section_path: Mapped[str] = mapped_column(String(1000), default="正文")
+    context_prefix: Mapped[str] = mapped_column(Text, default="")
+    parent_chunk_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    metadata_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    context_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    rule_metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    llm_scores: Mapped[dict] = mapped_column(JSON, default=dict)
+    llm_reason: Mapped[str] = mapped_column(Text, default="")
+    issue_codes: Mapped[list] = mapped_column(JSON, default=list)
+    suggestions: Mapped[list] = mapped_column(JSON, default=list)
+    composite_score: Mapped[float] = mapped_column(Float, default=0)
+    grade: Mapped[str] = mapped_column(String(20), default="fail", index=True)
+    review_sample: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    human_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    human_issue_codes: Mapped[list] = mapped_column(JSON, default=list)
+    human_comment: Mapped[str] = mapped_column(Text, default="")
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    run = relationship("ChunkEvaluationRun", back_populates="results")
 
 
 class Conversation(Base):

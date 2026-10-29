@@ -128,6 +128,16 @@ def test_model_edit_and_publication_auth_flow():
                 "model_name": "chat-test",
             },
         ).json()
+        enrichment = client.post(
+            "/api/v1/model-profiles",
+            headers=headers,
+            json={
+                "name": "enrichment",
+                "kind": "enrichment",
+                "base_url": "https://example.com/v1",
+                "model_name": "enrichment-test",
+            },
+        ).json()
         edited = client.patch(
             f"/api/v1/model-profiles/{llm['id']}",
             headers=headers,
@@ -147,6 +157,7 @@ def test_model_edit_and_publication_auth_flow():
             json={
                 "name": "kb",
                 "embedding_profile_id": embedding["id"],
+                "enrichment_profile_id": enrichment["id"],
                 "default_llm_profile_id": llm["id"],
             },
         ).json()

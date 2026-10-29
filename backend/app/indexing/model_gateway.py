@@ -180,7 +180,7 @@ class ModelGateway:
         if profile.kind == "embedding":
             vectors = await self.embed_texts(profile, ["这是一条连通性测试。"])
             details["dimensions"] = len(vectors[0])
-        elif profile.kind == "llm":
+        elif profile.kind in {"llm", "enrichment"}:
             answer = await self.complete(
                 profile,
                 [{"role": "user", "content": "只回复 OK"}],

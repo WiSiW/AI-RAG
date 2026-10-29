@@ -6,7 +6,7 @@ import jieba
 from whoosh import index
 from whoosh.analysis import Token, Tokenizer
 from whoosh.fields import ID, STORED, TEXT, Schema
-from whoosh.qparser import MultifieldParser, OrGroup
+from whoosh.qparser import MultifieldParser
 from whoosh.query import Or, Term
 
 from app.indexing.types import IndexedChunk, RetrievedChunk
@@ -33,7 +33,7 @@ class ChineseTokenizer(Tokenizer):
             word = word.strip()
             if not word:
                 continue
-            token.text = word
+            token.text = word.casefold()
             token.boost = 1.0
             token.pos = start_pos
             token.startchar = start_char
@@ -47,56 +47,70 @@ class BM25Store:
     def __init__(self, root_dir: str = "data/whoosh"):
         self.root_dir = Path(root_dir)
 
-    def _index_dir(self, kb_id: str) -> Path:
-        return self.root_dir / kb_id.replace("-", "")
+    def _index_dir(self, kb_id: str, index_version: str = "v1") -> Path:
+        base = self.root_dir / kb_id.replace("-", "")
+        return base / "v2" if index_version == "v2" else base
 
-    def _schema(self) -> Schema:
-        return Schema(
-            chunk_id=ID(stored=True, unique=True),
-            doc_id=ID(stored=True),
-            source=STORED(),
-            section=TEXT(analyzer=ChineseTokenizer(), stored=True),
-            content=TEXT(analyzer=ChineseTokenizer(), stored=True),
-        )
+    def _schema(self, index_version: str = "v1") -> Schema:
+        fields = {
+            "chunk_id": ID(stored=True, unique=True),
+            "doc_id": ID(stored=True),
+            "source": STORED(),
+            "section": TEXT(analyzer=ChineseTokenizer(), stored=True),
+            "content": TEXT(analyzer=ChineseTokenizer(), stored=True),
+        }
+        if index_version == "v2":
+            fields["keywords"] = TEXT(analyzer=ChineseTokenizer(), stored=True)
+        return Schema(**fields)
 
-    def _open(self, kb_id: str):
-        index_dir = self._index_dir(kb_id)
+    @staticmethod
+    def _document(chunk: IndexedChunk, include_keywords: bool) -> dict:
+        document = {
+            "chunk_id": chunk.chunk_id,
+            "doc_id": chunk.document_id,
+            "source": chunk.metadata.get("source", ""),
+            "section": chunk.section,
+            "content": chunk.content,
+        }
+        if include_keywords:
+            document["keywords"] = " ".join(chunk.keywords)
+        return document
+
+    def _open(self, kb_id: str, index_version: str = "v1"):
+        index_dir = self._index_dir(kb_id, index_version)
         index_dir.mkdir(parents=True, exist_ok=True)
         if index.exists_in(str(index_dir)):
             return index.open_dir(str(index_dir))
-        return index.create_in(str(index_dir), self._schema())
+        return index.create_in(str(index_dir), self._schema(index_version))
 
-    def add_chunks(self, kb_id: str, chunks: list[IndexedChunk]) -> None:
+    def add_chunks(
+        self, kb_id: str, chunks: list[IndexedChunk], *, index_version: str = "v1"
+    ) -> None:
         if not chunks:
             return
         with _write_lock:
-            ix = self._open(kb_id)
+            ix = self._open(kb_id, index_version)
+            include_keywords = "keywords" in ix.schema
             writer = ix.writer()
             for chunk in chunks:
-                writer.add_document(
-                    chunk_id=chunk.chunk_id,
-                    doc_id=chunk.document_id,
-                    source=chunk.metadata.get("source", ""),
-                    section=chunk.section,
-                    content=chunk.content,
-                )
+                writer.add_document(**self._document(chunk, include_keywords))
             writer.commit()
 
     def replace_document(
-        self, kb_id: str, document_id: str, chunks: list[IndexedChunk]
+        self,
+        kb_id: str,
+        document_id: str,
+        chunks: list[IndexedChunk],
+        *,
+        index_version: str = "v1",
     ) -> None:
         with _write_lock:
-            ix = self._open(kb_id)
+            ix = self._open(kb_id, index_version)
+            include_keywords = "keywords" in ix.schema
             writer = ix.writer()
             writer.delete_by_term("doc_id", document_id)
             for chunk in chunks:
-                writer.add_document(
-                    chunk_id=chunk.chunk_id,
-                    doc_id=chunk.document_id,
-                    source=chunk.metadata.get("source", ""),
-                    section=chunk.section,
-                    content=chunk.content,
-                )
+                writer.add_document(**self._document(chunk, include_keywords))
             writer.commit()
 
     def search(
@@ -105,17 +119,24 @@ class BM25Store:
         query: str,
         top_k: int,
         document_id: str | None = None,
+        *,
+        index_version: str = "v1",
     ) -> list[RetrievedChunk]:
-        ix = self._open(kb_id)
+        ix = self._open(kb_id, index_version)
         results: list[RetrievedChunk] = []
         search_fields = ["content"]
-        if getattr(ix.schema["section"], "format", None) is not None:
+        field_boosts = {"content": 1.0}
+        if "section" in ix.schema:
             search_fields.append("section")
+            field_boosts["section"] = 0.8
+        if "keywords" in ix.schema:
+            search_fields.append("keywords")
+            field_boosts["keywords"] = 1.5
         with ix.searcher() as searcher:
             parser = MultifieldParser(
                 search_fields,
                 schema=ix.schema,
-                group=OrGroup.factory(0.9),
+                fieldboosts=field_boosts,
             )
             try:
                 parsed_query = parser.parse(query)
@@ -132,7 +153,11 @@ class BM25Store:
                         content=hit["content"],
                         section=hit["section"],
                         source=hit["source"],
-                        metadata={"bm25_score": float(hit.score)},
+                        metadata={
+                            "bm25_score": float(hit.score),
+                            "matched_representations": ["bm25"],
+                            "representation_scores": {"bm25": float(hit.score)},
+                        },
                     )
                 )
         return results
@@ -147,20 +172,26 @@ class BM25Store:
         ]
         return Or(clauses)
 
-    def delete_document(self, kb_id: str, document_id: str) -> None:
+    def delete_document(
+        self, kb_id: str, document_id: str, *, index_version: str = "v1"
+    ) -> None:
         with _write_lock:
-            ix = self._open(kb_id)
+            ix = self._open(kb_id, index_version)
             writer = ix.writer()
             writer.delete_by_term("doc_id", document_id)
             writer.commit()
 
-    def delete_knowledge_base(self, kb_id: str) -> None:
-        index_dir = self._index_dir(kb_id)
+    def delete_knowledge_base(self, kb_id: str, *, index_version: str = "v1") -> None:
+        index_dir = self._index_dir(kb_id, index_version)
         if not index_dir.exists():
             return
         for child in index_dir.iterdir():
             if child.is_file():
                 child.unlink()
+
+    def delete_all_versions(self, kb_id: str) -> None:
+        self.delete_knowledge_base(kb_id, index_version="v1")
+        self.delete_knowledge_base(kb_id, index_version="v2")
 
     def health(self) -> tuple[bool, str]:
         try:

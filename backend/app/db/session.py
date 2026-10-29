@@ -31,6 +31,38 @@ def _apply_schema_migrations() -> None:
             additions.append(("documents", "metadata_json", "JSON DEFAULT '{}'"))
         if "chunk_mode" not in document_columns:
             additions.append(("documents", "chunk_mode", "VARCHAR(40) DEFAULT 'structure'"))
+    if "knowledge_bases" in tables:
+        knowledge_base_columns = {
+            column["name"] for column in inspector.get_columns("knowledge_bases")
+        }
+        if "enrichment_profile_id" not in knowledge_base_columns:
+            additions.append(("knowledge_bases", "enrichment_profile_id", "VARCHAR(36)"))
+    if "document_chunks" in tables:
+        chunk_columns = {column["name"] for column in inspector.get_columns("document_chunks")}
+        if "summary" not in chunk_columns:
+            additions.append(("document_chunks", "summary", "TEXT DEFAULT ''"))
+        if "keywords" not in chunk_columns:
+            additions.append(("document_chunks", "keywords", "JSON DEFAULT '[]'"))
+        if "hypothetical_questions" not in chunk_columns:
+            additions.append(("document_chunks", "hypothetical_questions", "JSON DEFAULT '[]'"))
+        if "enrichment_status" not in chunk_columns:
+            additions.append(
+                ("document_chunks", "enrichment_status", "VARCHAR(20) DEFAULT 'pending'")
+            )
+        if "enrichment_meta" not in chunk_columns:
+            additions.append(("document_chunks", "enrichment_meta", "JSON DEFAULT '{}'"))
+        if "granularity_level" not in chunk_columns:
+            additions.append(
+                ("document_chunks", "granularity_level", "VARCHAR(2) DEFAULT 'L2'")
+            )
+        if "granule_type" not in chunk_columns:
+            additions.append(
+                ("document_chunks", "granule_type", "VARCHAR(40) DEFAULT 'paragraph'")
+            )
+        if "parent_chunk_id" not in chunk_columns:
+            additions.append(("document_chunks", "parent_chunk_id", "VARCHAR(36)"))
+        if "context_prefix" not in chunk_columns:
+            additions.append(("document_chunks", "context_prefix", "TEXT DEFAULT ''"))
     if "conversations" in tables:
         conversation_columns = {
             column["name"] for column in inspector.get_columns("conversations")

@@ -25,6 +25,8 @@ Authorization: Bearer <access_token>
 | DELETE | `/model-profiles/{id}` | 删除未被引用的模型 |
 | POST | `/model-profiles/{id}/test` | 连通性测试 |
 
+`kind` 支持 `embedding`、`rerank`、`llm`、`enrichment`。分块增强模型使用 OpenAI-compatible Chat Completions 接口。
+
 ## 知识库
 
 | 方法 | 路径 | 说明 |
@@ -33,7 +35,10 @@ Authorization: Bearer <access_token>
 | POST | `/knowledge-bases` | 创建知识库 |
 | GET | `/knowledge-bases/{id}` | 知识库详情 |
 | PATCH | `/knowledge-bases/{id}` | 修改设置 |
+| POST | `/knowledge-bases/{id}/rebuild-index` | 异步重建增强与 v2 多向量索引 |
 | DELETE | `/knowledge-bases/{id}` | 删除知识库及数据 |
+
+创建知识库时必须提供 `embedding_profile_id` 与 `enrichment_profile_id`。`settings.retrieval_weights` 支持 `bm25`、`l1`、`original`、`summary`、`questions`、`l3` 六个非负权重；默认分别为 `1.0/0.8/1.0/1.0/1.0/0.6`。
 
 ## 文档
 
@@ -47,6 +52,8 @@ Authorization: Bearer <access_token>
 | POST | `/documents/{id}/reindex` | 重新入库 |
 | DELETE | `/documents/{id}` | 删除文档与索引 |
 | GET | `/ingestion-jobs/{id}` | 入库任务状态 |
+
+分块响应额外包含 `granularity_level`（`L1/L2/L3`）、`granule_type`、`parent_chunk_id`、`context_prefix`、`summary`、`keywords`、`hypothetical_questions`、`enrichment_status` 与 `enrichment_meta`。
 
 上传字段：
 
@@ -66,6 +73,25 @@ Authorization: Bearer <access_token>
 | DELETE | `/conversations/{id}` | 删除会话 |
 | POST | `/feedback` | 回答反馈 |
 
+## 分块语义完整性评估
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/chunk-evaluations` | 创建文档或知识库级评估任务 |
+| GET | `/chunk-evaluations` | 查询评估历史 |
+| GET | `/chunk-evaluations/{id}` | 查询运行、进度和汇总 |
+| GET | `/chunk-evaluations/{id}/results` | 按粒度、等级、问题标签分页查询 chunk 结果 |
+| PATCH | `/chunk-evaluations/{id}/results/{result_id}` | 提交人工评分、标签和备注 |
+| GET | `/chunk-evaluations/compare?run_ids=id1,id2` | 比较两次运行 |
+| DELETE | `/chunk-evaluations/{id}` | 删除历史运行 |
+
+创建参数：
+
+- `document_id` 与 `knowledge_base_id` 必须且只能提供一个。
+- `granularities`：可选 `L1/L2/L3`，默认全部。
+- `judge_profile_id`：可选，默认使用知识库增强模型；支持启用的 LLM 或增强模型。
+- `llm_enabled`：默认 `true`；关闭时只执行规则评估。
+
 多知识库请求使用 `knowledge_base_ids`：
 
 ```json
@@ -83,6 +109,8 @@ Authorization: Bearer <access_token>
 - `knowledge_base_id` 与 `knowledge_base_ids` 不能同时传递。
 - 多知识库请求不支持通过 `document_id` 限定单个文档。
 - 会话会固定本次选择的知识库范围；更改范围需要新建会话。
+
+检索结果额外返回 `matched_representations`、`representation_scores`、`representation_ranks`、`granularity_level`、`granule_type`、`parent_chunk_id`、`context_prefix` 与 `context_text`，用于查看命中的召回路由、粒度、上下文位置和 L3 父段落关系；`vector_score/vector_rank` 继续保持为最佳向量路由的兼容字段。Search 调试接口的 `context_text` 默认等于小块正文；Chat 生成时会动态填充父窗口和邻块。
 
 发布接口的 `knowledge_base_ids` 是授权范围。调用时可传其子集；不传时默认查询全部已授权知识库。
 
