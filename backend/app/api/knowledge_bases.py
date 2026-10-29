@@ -160,6 +160,9 @@ def update_knowledge_base(
     kb = db.get(KnowledgeBase, kb_id)
     if kb is None:
         raise NotFoundError("知识库不存在")
+    from app.services.knowledge_base_transfer_service import KnowledgeBaseTransferService
+
+    KnowledgeBaseTransferService.ensure_kb_writable(db, kb_id)
     fields = request.model_fields_set
     if "name" in fields and request.name is not None:
         kb.name = request.name
@@ -210,6 +213,9 @@ def rebuild_knowledge_base_index(
     kb = db.get(KnowledgeBase, kb_id)
     if kb is None:
         raise NotFoundError("知识库不存在")
+    from app.services.knowledge_base_transfer_service import KnowledgeBaseTransferService
+
+    KnowledgeBaseTransferService.ensure_kb_writable(db, kb_id)
     settings_data = dict(kb.settings or {})
     migration = dict(settings_data.get("index_migration") or {})
     if migration.get("status") == "running":
@@ -247,6 +253,9 @@ def delete_knowledge_base(
     kb = db.get(KnowledgeBase, kb_id)
     if kb is None:
         raise NotFoundError("知识库不存在")
+    from app.services.knowledge_base_transfer_service import KnowledgeBaseTransferService
+
+    KnowledgeBaseTransferService.ensure_kb_writable(db, kb_id)
     active_count = db.scalar(
         select(func.count(Document.id)).where(
             Document.kb_id == kb_id,

@@ -194,6 +194,58 @@ class MilvusVectorStore:
             )
         return retrieved
 
+    def export_representations(
+        self, kb_id: str, dimensions: int, *, index_version: str = "v2"
+    ) -> list[dict]:
+        _ensure_connection()
+        name = collection_name(kb_id, index_version)
+        if not utility.has_collection(name):
+            raise ValueError("知识库向量集合不存在")
+        collection = Collection(name)
+        current_dim = _vector_dimension(collection)
+        if current_dim and current_dim != dimensions:
+            raise ValueError("知识库向量维度与导出配置不一致")
+        collection.load()
+        collection.flush()
+        output_fields = [
+            "chunk_id",
+            "doc_id",
+            "source",
+            "section",
+            "representation_type",
+            "question_index",
+            "indexed_text",
+            "embedding",
+        ]
+        rows: list[dict] = []
+        iterator = collection.query_iterator(
+            batch_size=1000,
+            expr="pk >= 0",
+            output_fields=output_fields,
+        )
+        try:
+            while page := iterator.next():
+                for row in page:
+                    rows.append(
+                        {
+                            "chunk_id": str(row.get("chunk_id", "")),
+                            "doc_id": str(row.get("doc_id", "")),
+                            "source": str(row.get("source", "")),
+                            "section": str(row.get("section", "")),
+                            "representation_type": str(
+                                row.get("representation_type", "original")
+                            ),
+                            "question_index": int(row.get("question_index", 0) or 0),
+                            "indexed_text": str(row.get("indexed_text", "")),
+                            "embedding": [
+                                float(value) for value in row.get("embedding", [])
+                            ],
+                        }
+                    )
+        finally:
+            iterator.close()
+        return rows
+
     def delete_document(
         self, kb_id: str, document_id: str, *, index_version: str = "v2"
     ) -> None:

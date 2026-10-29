@@ -92,6 +92,27 @@ Authorization: Bearer <access_token>
 - `judge_profile_id`：可选，默认使用知识库增强模型；支持启用的 LLM 或增强模型。
 - `llm_enabled`：默认 `true`；关闭时只执行规则评估。
 
+## 知识库导出与导入
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/knowledge-bases/{id}/exports` | 创建知识库导出任务，`mode=documents|full` |
+| GET | `/knowledge-base-transfers/{job_id}` | 查询导入/导出任务状态与进度 |
+| GET | `/knowledge-base-transfers/{job_id}/download` | 下载已完成的导出包 |
+| DELETE | `/knowledge-base-transfers/{job_id}` | 删除已结束任务和包文件 |
+| POST | `/knowledge-base-imports/inspect` | 上传 ZIP 并校验 manifest、文件哈希和包结构 |
+| POST | `/knowledge-base-imports` | 上传 ZIP 并创建新知识库 |
+
+导入 multipart 字段：
+
+- `package`：知识库 ZIP。
+- `embedding_profile_id`、`enrichment_profile_id`：必填目标模型。
+- `rerank_profile_id`、`llm_profile_id`：可选。
+- `name`：可选的新知识库名称；冲突时自动加“（导入 N）”。
+- `index_policy`：`strict` 或 `rebuild`；文档包始终使用 `rebuild`。
+
+完整包严格恢复要求目标 Embedding 的 `provider`、`model_name`、`dimensions` 与包 manifest 完全一致。
+
 多知识库请求使用 `knowledge_base_ids`：
 
 ```json

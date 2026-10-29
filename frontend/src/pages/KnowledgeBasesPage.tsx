@@ -1,9 +1,10 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Database, FileText, Plus, Trash2, UploadCloud } from "lucide-react";
+import { Bot, Database, FileText, FileUp, Plus, Trash2, UploadCloud } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { EmptyState, ErrorState, LoadingState, Modal, PageHeader } from "../components/UI";
+import type { KnowledgeBasePackageInspection, KnowledgeBaseTransferJob } from "../types";
 
 interface FormState {
   name: string;
@@ -40,6 +41,16 @@ const initialForm: FormState = {
 export default function KnowledgeBasesPage() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [inspection, setInspection] = useState<KnowledgeBasePackageInspection | null>(null);
+  const [importName, setImportName] = useState("");
+  const [importEmbeddingId, setImportEmbeddingId] = useState("");
+  const [importEnrichmentId, setImportEnrichmentId] = useState("");
+  const [importRerankId, setImportRerankId] = useState("");
+  const [importLlmId, setImportLlmId] = useState("");
+  const [indexPolicy, setIndexPolicy] = useState<"strict" | "rebuild">("strict");
+  const [importJob, setImportJob] = useState<KnowledgeBaseTransferJob | null>(null);
   const [form, setForm] = useState<FormState>(initialForm);
 
   const kbQuery = useQuery({ queryKey: ["knowledge-bases"], queryFn: api.listKnowledgeBases });
@@ -82,6 +93,45 @@ export default function KnowledgeBasesPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] }),
   });
 
+  const inspectMutation = useMutation({
+    mutationFn: (file: File) => api.inspectKnowledgeBasePackage(file),
+    onSuccess: (result) => {
+      setInspection(result);
+      const kbMetadata = (result.manifest.knowledge_base as Record<string, unknown> | undefined) ?? {};
+      setImportName(String(kbMetadata.name ?? ""));
+      setIndexPolicy("strict");
+    },
+  });
+
+  const importMutation = useMutation({
+    mutationFn: () => api.importKnowledgeBase(importFile!, {
+      embedding_profile_id: importEmbeddingId,
+      enrichment_profile_id: importEnrichmentId,
+      rerank_profile_id: importRerankId || undefined,
+      llm_profile_id: importLlmId || undefined,
+      name: importName.trim(),
+      index_policy: inspection?.manifest.mode === "documents" ? "rebuild" : indexPolicy,
+    }),
+    onSuccess: setImportJob,
+  });
+
+  const importJobQuery = useQuery({
+    queryKey: ["kb-transfer", importJob?.id],
+    queryFn: () => api.getKnowledgeBaseTransfer(importJob!.id),
+    enabled: !!importJob?.id && (importJob?.status === "queued" || importJob?.status === "running"),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "queued" || status === "running" ? 2000 : false;
+    },
+  });
+  const activeImportJob = importJobQuery.data ?? importJob;
+
+  useEffect(() => {
+    if (activeImportJob?.status === "completed") {
+      queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
+    }
+  }, [activeImportJob?.status, queryClient]);
+
   function openCreate() {
     setForm({
       ...initialForm,
@@ -91,6 +141,19 @@ export default function KnowledgeBasesPage() {
       llmProfileId: llmModels[0]?.id ?? "",
     });
     setOpen(true);
+  }
+
+  function openImport() {
+    setImportOpen(true);
+    setImportFile(null);
+    setInspection(null);
+    setImportJob(null);
+    setImportName("");
+    setImportEmbeddingId(embeddingModels[0]?.id ?? "");
+    setImportEnrichmentId(enrichmentModels[0]?.id ?? "");
+    setImportRerankId(rerankModels[0]?.id ?? "");
+    setImportLlmId(llmModels[0]?.id ?? "");
+    setIndexPolicy("strict");
   }
 
   function submit(event: FormEvent) {
@@ -110,12 +173,7 @@ export default function KnowledgeBasesPage() {
       <PageHeader
         title="知识库"
         description="知识库绑定固定的 Embedding、增强与默认问答模型，并统一管理文档和检索参数。"
-        action={
-          <button type="button" onClick={openCreate} className="btn-primary">
-            <Plus className="h-4 w-4" />
-            新建知识库
-          </button>
-        }
+        action={<div className="flex gap-2"><button type="button" onClick={openImport} className="btn-secondary"><FileUp className="h-4 w-4" />导入知识库</button><button type="button" onClick={openCreate} className="btn-primary"><Plus className="h-4 w-4" />新建知识库</button></div>}
       />
 
       {mutationError && <div className="mb-4"><ErrorState message={mutationError.message} /></div>}
@@ -259,6 +317,45 @@ export default function KnowledgeBasesPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      <Modal open={importOpen} onClose={() => setImportOpen(false)} title="导入知识库" wide>
+        <div className="space-y-4">
+          {!activeImportJob || activeImportJob.status === "failed" ? (
+            <>
+              <div><label className="label">知识库包 ZIP</label><input className="input" type="file" accept=".zip,application/zip" onChange={(event) => { const file = event.target.files?.[0] ?? null; setImportFile(file); setInspection(null); setImportJob(null); }} /></div>
+              {activeImportJob?.status === "failed" && <div className="rounded-xl bg-red-50 p-3 text-xs text-red-700">{activeImportJob.errors.map((error) => String(error.error ?? JSON.stringify(error))).join("；")}</div>}
+              {importFile && <button type="button" className="btn-secondary" disabled={inspectMutation.isPending} onClick={() => inspectMutation.mutate(importFile)}>{inspectMutation.isPending ? "预检中..." : "预检知识库包"}</button>}
+              {inspectMutation.error && <ErrorState message={inspectMutation.error.message} />}
+              {importJobQuery.error && <ErrorState message={importJobQuery.error.message} />}
+              {inspection && (
+                <div className="space-y-4">
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800">包校验通过 · {inspection.package_name} · {String(inspection.manifest.mode === "full" ? "完整包" : "文档包")}</div>
+                  {inspection.warnings.length > 0 && <div className="rounded-xl bg-amber-50 p-3 text-xs text-amber-700">{inspection.warnings.join("；")}</div>}
+                  <div><label className="label">新知识库名称</label><input className="input" value={importName} onChange={(event) => setImportName(event.target.value)} placeholder="留空则使用包内名称" /></div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div><label className="label">Embedding 模型</label><select className="input" value={importEmbeddingId} onChange={(event) => setImportEmbeddingId(event.target.value)}><option value="">请选择</option>{embeddingModels.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.dimensions} 维</option>)}</select></div>
+                    <div><label className="label">增强模型</label><select className="input" value={importEnrichmentId} onChange={(event) => setImportEnrichmentId(event.target.value)}><option value="">请选择</option>{enrichmentModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></div>
+                    <div><label className="label">重排序模型</label><select className="input" value={importRerankId} onChange={(event) => setImportRerankId(event.target.value)}><option value="">不使用</option>{rerankModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></div>
+                    <div><label className="label">默认问答模型</label><select className="input" value={importLlmId} onChange={(event) => setImportLlmId(event.target.value)}><option value="">请选择</option>{llmModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></div>
+                  </div>
+                  {inspection.manifest.mode === "full" ? (
+                    <div><label className="label">索引恢复策略</label><div className="flex gap-2"><button type="button" onClick={() => setIndexPolicy("strict")} className={`chip ${indexPolicy === "strict" ? "bg-brand-100 text-brand-800" : "bg-slate-100"}`}>严格恢复</button><button type="button" onClick={() => setIndexPolicy("rebuild")} className={`chip ${indexPolicy === "rebuild" ? "bg-brand-100 text-brand-800" : "bg-slate-100"}`}>重新嵌入</button></div><p className="mt-1 text-xs text-slate-500">严格恢复要求目标 Embedding 的 provider/model/dimensions 与包一致；不匹配时请选择重新嵌入。</p></div>
+                  ) : <div className="rounded-xl bg-amber-50 p-3 text-xs text-amber-700">文档包不携带向量，将基于包内 chunk 和 QA 重新生成 Embedding 与索引。</div>}
+                  {importMutation.error && <ErrorState message={importMutation.error.message} />}
+                  <button type="button" className="btn-primary" disabled={importMutation.isPending || !importEmbeddingId || !importEnrichmentId} onClick={() => importMutation.mutate()}>{importMutation.isPending ? "创建导入任务..." : "开始导入"}</button>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              {importJobQuery.error && <ErrorState message={importJobQuery.error.message} />}
+              <div className="flex items-center justify-between"><span className="font-medium text-slate-800">导入任务</span><span className="chip bg-white text-xs">{activeImportJob.status}</span></div>
+              <div className="mt-2 text-xs text-slate-500">阶段：{String(activeImportJob.progress.phase ?? "-")} · 文档 {String(activeImportJob.progress.documents ?? 0)} · Chunk {String(activeImportJob.progress.chunks ?? 0)}</div>
+              {activeImportJob.status === "completed" && activeImportJob.result_knowledge_base_id && <Link to={`/knowledge-bases/${activeImportJob.result_knowledge_base_id}`} className="btn-primary mt-3" onClick={() => queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] })}>打开新知识库</Link>}
+            </div>
+          )}
+        </div>
       </Modal>
     </div>
   );

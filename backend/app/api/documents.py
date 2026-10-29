@@ -101,6 +101,12 @@ def _get_kb(db: Session, kb_id: str) -> KnowledgeBase:
     return kb
 
 
+def _ensure_kb_writable(db: Session, kb_id: str) -> None:
+    from app.services.knowledge_base_transfer_service import KnowledgeBaseTransferService
+
+    KnowledgeBaseTransferService.ensure_kb_writable(db, kb_id)
+
+
 def _upload_options(
     kb: KnowledgeBase,
     chunk_size: int | None,
@@ -226,6 +232,7 @@ async def _register_upload(
     tags: str,
     extra_metadata: dict | None = None,
 ) -> UploadResponse:
+    _ensure_kb_writable(db, kb.id)
     safe_name, _ = _validate_filename(upload.filename or "document")
     actual_size, actual_overlap, actual_mode = _upload_options(
         kb, chunk_size, chunk_overlap, chunk_mode
@@ -262,6 +269,7 @@ async def _register_local_file(
     tags: str,
     extra_metadata: dict | None = None,
 ) -> UploadResponse:
+    _ensure_kb_writable(db, kb.id)
     safe_name, _ = _validate_filename(filename)
     size_bytes = local_path.stat().st_size
     if size_bytes > settings.upload_max_bytes:
@@ -663,6 +671,7 @@ def reindex_document(
     document = db.get(Document, document_id)
     if document is None:
         raise NotFoundError("文档不存在")
+    _ensure_kb_writable(db, document.kb_id)
     if document.status in {DocumentStatus.PENDING, DocumentStatus.PROCESSING}:
         raise ConflictError("文档正在处理中")
     document.status = DocumentStatus.PENDING
@@ -690,6 +699,7 @@ def delete_document(
     document = db.get(Document, document_id)
     if document is None:
         raise NotFoundError("文档不存在")
+    _ensure_kb_writable(db, document.kb_id)
     if document.status in {DocumentStatus.PENDING, DocumentStatus.PROCESSING}:
         raise ConflictError("文档正在处理中，暂时无法删除")
     vector_store.delete_document(document.kb_id, document.id, index_version="v1")

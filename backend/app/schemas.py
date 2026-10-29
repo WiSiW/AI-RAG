@@ -15,6 +15,8 @@ ChunkModeValue = Literal[
 ]
 PublicationKindValue = Literal["qa", "search"]
 EvaluationGranularityValue = Literal["L1", "L2", "L3"]
+KnowledgeBaseExportMode = Literal["documents", "full"]
+KnowledgeBaseIndexPolicy = Literal["strict", "rebuild"]
 
 
 def _normalize_scope(
@@ -263,6 +265,37 @@ class ChunkEvaluationReviewUpdate(BaseModel):
     human_score: int = Field(ge=1, le=5)
     human_issue_codes: list[str] = Field(default_factory=list)
     human_comment: str = Field(default="", max_length=4000)
+
+
+class KnowledgeBaseExportRequest(BaseModel):
+    mode: KnowledgeBaseExportMode = "documents"
+
+
+class KnowledgeBaseTransferJobRead(ORMModel):
+    id: str
+    kind: str
+    mode: str
+    index_policy: str
+    status: str
+    source_knowledge_base_id: str | None
+    result_knowledge_base_id: str | None
+    package_name: str
+    object_key: str | None
+    file_size: int
+    progress: dict[str, Any]
+    manifest: dict[str, Any]
+    errors: list[Any]
+    created_by: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class KnowledgeBasePackageInspection(BaseModel):
+    valid: bool
+    package_name: str
+    manifest: dict[str, Any]
+    warnings: list[str] = Field(default_factory=list)
 
 
 class UploadResponse(BaseModel):

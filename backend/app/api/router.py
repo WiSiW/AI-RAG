@@ -8,6 +8,7 @@ from app.api import (
     documents,
     feedback,
     health,
+    knowledge_base_transfers,
     knowledge_bases,
     model_profiles,
     public_api,
@@ -21,6 +22,7 @@ api_router.include_router(health.router)
 api_router.include_router(system.router)
 api_router.include_router(model_profiles.router)
 api_router.include_router(knowledge_bases.router)
+api_router.include_router(knowledge_base_transfers.router)
 api_router.include_router(documents.router)
 api_router.include_router(chat.router)
 api_router.include_router(chunk_evaluations.router)

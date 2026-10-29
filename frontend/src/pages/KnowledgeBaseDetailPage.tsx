@@ -1,15 +1,18 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Bot, FileText, Pencil, RefreshCw, Search, Trash2, UploadCloud } from "lucide-react";
+import { ArrowLeft, Bot, Download, FileText, Pencil, RefreshCw, Search, Trash2, UploadCloud } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
-import { api } from "../api/client";
+import { api, downloadKnowledgeBasePackage } from "../api/client";
 import { EmptyState, ErrorState, LoadingState, Modal, PageHeader, StatusBadge, formatBytes, formatDate } from "../components/UI";
-import type { KnowledgeBase } from "../types";
+import type { KnowledgeBase, KnowledgeBaseTransferJob } from "../types";
 
 export default function KnowledgeBaseDetailPage() {
   const { kbId = "" } = useParams();
   const queryClient = useQueryClient();
   const [editOpen, setEditOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportMode, setExportMode] = useState<"documents" | "full">("documents");
+  const [exportJob, setExportJob] = useState<KnowledgeBaseTransferJob | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [rerankId, setRerankId] = useState("");
@@ -89,6 +92,25 @@ export default function KnowledgeBaseDetailPage() {
     },
   });
 
+  const exportMutation = useMutation({
+    mutationFn: () => api.exportKnowledgeBase(kbId, exportMode),
+    onSuccess: setExportJob,
+  });
+  const exportJobQuery = useQuery({
+    queryKey: ["kb-transfer", exportJob?.id],
+    queryFn: () => api.getKnowledgeBaseTransfer(exportJob!.id),
+    enabled: !!exportJob?.id && (exportJob?.status === "queued" || exportJob?.status === "running"),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "queued" || status === "running" ? 2000 : false;
+    },
+  });
+  const deleteExportMutation = useMutation({
+    mutationFn: (id: string) => api.deleteKnowledgeBaseTransfer(id),
+    onSuccess: () => setExportJob(null),
+  });
+  const activeExportJob = exportJobQuery.data ?? exportJob;
+
   const deleteDocMutation = useMutation({
     mutationFn: api.deleteDocument,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["documents", kbId] }),
@@ -147,6 +169,7 @@ export default function KnowledgeBaseDetailPage() {
         action={
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => openEdit(kb)} className="btn-secondary"><Pencil className="h-4 w-4" />设置</button>
+            <button type="button" onClick={() => { setExportJob(null); setExportMode("documents"); setExportOpen(true); }} className="btn-secondary"><Download className="h-4 w-4" />导出</button>
             <button
               type="button"
               onClick={() => {
@@ -318,6 +341,33 @@ export default function KnowledgeBaseDetailPage() {
             <button type="submit" className="btn-primary" disabled={updateMutation.isPending || !name.trim() || !enrichmentId}>{updateMutation.isPending ? "保存中..." : "保存设置"}</button>
           </div>
         </form>
+      </Modal>
+
+      <Modal open={exportOpen} onClose={() => setExportOpen(false)} title="导出知识库" wide>
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <button type="button" onClick={() => setExportMode("documents")} className={`rounded-xl border p-4 text-left ${exportMode === "documents" ? "border-brand-300 bg-brand-50" : "border-slate-200"}`}>
+              <div className="font-medium text-slate-900">文档包</div>
+              <div className="mt-1 text-xs leading-5 text-slate-500">包含原始文档、元数据、L1/L2/L3、QA；导入时重新生成向量和索引。</div>
+            </button>
+            <button type="button" onClick={() => setExportMode("full")} className={`rounded-xl border p-4 text-left ${exportMode === "full" ? "border-brand-300 bg-brand-50" : "border-slate-200"}`}>
+              <div className="font-medium text-slate-900">完整包（含索引）</div>
+              <div className="mt-1 text-xs leading-5 text-slate-500">额外包含 Milvus 向量和 BM25 快照；兼容模型下可严格恢复索引。</div>
+            </button>
+          </div>
+          {exportMutation.error && <ErrorState message={exportMutation.error.message} />}
+          {exportJobQuery.error && <ErrorState message={exportJobQuery.error.message} />}
+          {activeExportJob && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+              <div className="flex items-center justify-between gap-2"><span>{activeExportJob.package_name}</span><span className="chip bg-white text-xs">{activeExportJob.status}</span></div>
+              <div className="mt-2 text-xs text-slate-500">文档 {String(activeExportJob.progress.documents ?? 0)} · Chunk {String(activeExportJob.progress.chunks ?? 0)} · 向量 {String(activeExportJob.progress.vectors ?? 0)}</div>
+              <div className="mt-3 flex gap-2">{activeExportJob.status === "completed" && <button type="button" className="btn-primary" onClick={() => downloadKnowledgeBasePackage(activeExportJob)}><Download className="h-4 w-4" />下载 ZIP</button>}{(activeExportJob.status === "completed" || activeExportJob.status === "failed") && <button type="button" className="btn-secondary" disabled={deleteExportMutation.isPending} onClick={() => deleteExportMutation.mutate(activeExportJob.id)}><Trash2 className="h-4 w-4" />删除任务</button>}</div>
+              {deleteExportMutation.error && <ErrorState message={deleteExportMutation.error.message} />}
+              {activeExportJob.errors.map((error, index) => <div key={index} className="mt-2 text-xs text-red-600">{String(error.error ?? JSON.stringify(error))}</div>)}
+            </div>
+          )}
+          <div className="flex justify-end gap-2"><button type="button" className="btn-secondary" onClick={() => setExportOpen(false)}>关闭</button><button type="button" className="btn-primary" disabled={exportMutation.isPending || activeExportJob?.status === "queued" || activeExportJob?.status === "running"} onClick={() => exportMutation.mutate()}>{exportMutation.isPending ? "创建中..." : "开始导出"}</button></div>
+        </div>
       </Modal>
     </div>
   );

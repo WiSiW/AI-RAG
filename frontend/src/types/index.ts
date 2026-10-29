@@ -293,6 +293,33 @@ export interface ChunkEvaluationResultsPage {
   page_size: number;
 }
 
+export interface KnowledgeBaseTransferJob {
+  id: string;
+  kind: "export" | "import";
+  mode: "documents" | "full";
+  index_policy: "strict" | "rebuild";
+  status: "queued" | "running" | "completed" | "failed";
+  source_knowledge_base_id: string | null;
+  result_knowledge_base_id: string | null;
+  package_name: string;
+  object_key: string | null;
+  file_size: number;
+  progress: Record<string, unknown>;
+  manifest: Record<string, unknown>;
+  errors: Array<Record<string, unknown>>;
+  created_by: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface KnowledgeBasePackageInspection {
+  valid: boolean;
+  package_name: string;
+  manifest: Record<string, unknown>;
+  warnings: string[];
+}
+
 export interface ChunkModeCapability {
   value: ChunkMode;
   label: string;

@@ -12,6 +12,8 @@ import type {
   DocumentItem,
   IngestionJob,
   KnowledgeBase,
+  KnowledgeBasePackageInspection,
+  KnowledgeBaseTransferJob,
   ModelProfile,
   ModelTestResult,
   PublishedApi,
@@ -118,6 +120,34 @@ export const api = {
     request<{ task_id: string; status: string }>(`/knowledge-bases/${id}/rebuild-index`, {
       method: "POST",
     }),
+  exportKnowledgeBase: (id: string, mode: "documents" | "full") =>
+    request<KnowledgeBaseTransferJob>(`/knowledge-bases/${id}/exports`, {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }),
+  getKnowledgeBaseTransfer: (id: string) =>
+    request<KnowledgeBaseTransferJob>(`/knowledge-base-transfers/${id}`),
+  deleteKnowledgeBaseTransfer: (id: string) =>
+    request<void>(`/knowledge-base-transfers/${id}`, { method: "DELETE" }),
+  inspectKnowledgeBasePackage: async (file: File) => {
+    const form = new FormData();
+    form.append("package", file);
+    return request<KnowledgeBasePackageInspection>("/knowledge-base-imports/inspect", {
+      method: "POST",
+      body: form,
+    });
+  },
+  importKnowledgeBase: async (file: File, payload: Record<string, unknown>) => {
+    const form = new FormData();
+    form.append("package", file);
+    Object.entries(payload).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== "") form.append(key, String(value));
+    });
+    return request<KnowledgeBaseTransferJob>("/knowledge-base-imports", {
+      method: "POST",
+      body: form,
+    });
+  },
 
   getCapabilities: () => request<Capabilities>("/system/capabilities"),
 
@@ -362,6 +392,22 @@ export async function sendNonStreamingChat(payload: Omit<ChatPayload, "stream">)
     method: "POST",
     body: JSON.stringify({ ...payload, stream: false }),
   });
+}
+
+export async function downloadKnowledgeBasePackage(job: KnowledgeBaseTransferJob): Promise<void> {
+  const response = await fetch(`${API_BASE}/knowledge-base-transfers/${job.id}/download`, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  if (!response.ok) throw new ApiError(`下载失败 (${response.status})`, response.status);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = job.package_name || `knowledge-base-${job.id}.zip`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 

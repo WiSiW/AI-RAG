@@ -40,6 +40,18 @@ class EvaluationStatus(StrEnum):
     FAILED = "failed"
 
 
+class TransferJobKind(StrEnum):
+    EXPORT = "export"
+    IMPORT = "import"
+
+
+class TransferStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class ModelProfile(Base):
     __tablename__ = "model_profiles"
 
@@ -227,6 +239,34 @@ class ChunkEvaluationResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     run = relationship("ChunkEvaluationRun", back_populates="results")
+
+
+class KnowledgeBaseTransferJob(Base):
+    __tablename__ = "knowledge_base_transfer_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), index=True)
+    mode: Mapped[str] = mapped_column(String(20), default="documents")
+    index_policy: Mapped[str] = mapped_column(String(20), default="strict")
+    status: Mapped[str] = mapped_column(
+        String(20), default=TransferStatus.QUEUED, index=True
+    )
+    source_knowledge_base_id: Mapped[str | None] = mapped_column(
+        String(36), index=True, nullable=True
+    )
+    result_knowledge_base_id: Mapped[str | None] = mapped_column(
+        String(36), index=True, nullable=True
+    )
+    package_name: Mapped[str] = mapped_column(String(500), default="")
+    object_key: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    file_size: Mapped[int] = mapped_column(Integer, default=0)
+    progress: Mapped[dict] = mapped_column(JSON, default=dict)
+    manifest: Mapped[dict] = mapped_column(JSON, default=dict)
+    errors: Mapped[list] = mapped_column(JSON, default=list)
+    created_by: Mapped[str] = mapped_column(String(120), default="admin")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Conversation(Base):

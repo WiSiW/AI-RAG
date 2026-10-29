@@ -6,6 +6,7 @@ from app.db.models import KnowledgeBase
 from app.db.session import SessionLocal
 from app.evaluation.service import ChunkEvaluationService
 from app.services.ingestion_service import IngestionService
+from app.services.knowledge_base_transfer_service import KnowledgeBaseTransferService
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -66,5 +67,31 @@ def evaluate_chunks_task(run_id: str) -> None:
     db = SessionLocal()
     try:
         asyncio.run(ChunkEvaluationService().run(db, run_id))
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="zhiyuan.export_knowledge_base",
+    time_limit=12 * 60 * 60,
+    soft_time_limit=12 * 60 * 60 - 300,
+)
+def export_knowledge_base_task(job_id: str) -> None:
+    db = SessionLocal()
+    try:
+        KnowledgeBaseTransferService().export_knowledge_base(db, job_id)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="zhiyuan.import_knowledge_base",
+    time_limit=12 * 60 * 60,
+    soft_time_limit=12 * 60 * 60 - 300,
+)
+def import_knowledge_base_task(job_id: str) -> None:
+    db = SessionLocal()
+    try:
+        asyncio.run(KnowledgeBaseTransferService().import_knowledge_base(db, job_id))
     finally:
         db.close()

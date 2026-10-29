@@ -30,6 +30,7 @@
 - Milvus 表示行多向量索引 + Whoosh 关键词增强 BM25 索引
 - L1 章节摘要、L2 原块/摘要/问题、L3 原子块与 BM25 多路召回、加权 RRF、Rerank 精排
 - 分块语义完整性评估：规则检测、LLM 语义评分、人工抽样复核与历史运行对比
+- 知识库可移植导出/导入：文档包或含向量/BM25 快照的完整包，支持 ID 重映射和索引恢复
 - 多知识库联合检索：按 Embedding 模型分组召回、全局 RRF 融合、统一重排与跨库引用
 - 查询改写、最近窗口记忆、超长会话摘要
 - SSE 流式问答、引用解析与文档/分块回链
@@ -264,6 +265,7 @@ npm.cmd run build
 | `ZHIYUAN_MINIO_*` | 对象存储配置 |
 | `ZHIYUAN_MILVUS_URI` | Milvus 地址 |
 | `ZHIYUAN_UPLOAD_MAX_MB` | 单文件大小上限 |
+| `ZHIYUAN_KB_PACKAGE_MAX_MB` | 知识库导入/导出包大小上限 |
 | `ZHIYUAN_AUTO_CREATE_TABLES` | 启动时自动建表 |
 | `ZHIYUAN_RAG_PARENT_CONTEXT_TOKENS` | parent-document 命中位置前后各保留的 token 数 |
 | `ZHIYUAN_RAG_NEIGHBOR_CONTEXT_TOKENS` | 前/后邻接块追加的 token 数 |
@@ -335,6 +337,15 @@ L1 和 L2 进入 Whoosh BM25，L3 只进入 Milvus 密集向量索引。检索�
 - LLM 按粒度 Rubric 评判自包含性、事实完整性、上下文依赖和整改建议；失败时保留规则结果并将运行标记为 `partial`。
 - 每次运行保存 chunk、父块、章节源文本和前后邻块快照，支持历史结果和跨分块配置对比。
 - 人工抽样按粒度分层，可提交 1–5 分、问题标签和备注；汇总中展示人工-LLM MAE 与相关性。
+
+## 知识库导出与导入
+
+- 知识库详情页支持导出“文档包”或“完整包（含索引）”，导出期间知识库进入临时写锁。
+- 文档包包含原始文件、文档元数据、L1/L2/L3、QA 和增强字段；导入时基于现有 chunk 重新生成 Embedding，不重新分块或生成 QA。
+- 完整包额外包含可移植 Milvus 向量和 BM25 快照；目标 Embedding 完全兼容时可严格恢复，否则可选择重新嵌入。
+- 导入始终创建新知识库，重新映射文档、chunk、父块和 QA 引用；名称冲突自动生成“（导入 N）”后缀。
+- ZIP 使用 manifest 与 SHA-256 校验，拒绝路径穿越、重复文件、未知版本、超限包和损坏文件。
+- 导入失败会回滚新知识库、MinIO 文件、Milvus 集合和 Whoosh 目录。
 
 ## 批量上传与大文件
 

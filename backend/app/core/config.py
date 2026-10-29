@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     auto_create_tables: bool = True
     upload_max_mb: int = 2048
     archive_max_mb: int = 4096
+    kb_package_max_mb: int = 8192
     upload_temp_dir: str = "data/uploads"
     import_root: str = "data/imports"
     public_base_url: str = ""
@@ -77,6 +78,10 @@ class Settings(BaseSettings):
     @property
     def archive_max_bytes(self) -> int:
         return self.archive_max_mb * 1024 * 1024
+
+    @property
+    def kb_package_max_bytes(self) -> int:
+        return self.kb_package_max_mb * 1024 * 1024
 
 
 @lru_cache
