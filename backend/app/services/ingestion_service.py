@@ -30,6 +30,7 @@ from app.db.models import (
 from app.indexing.bm25_store import BM25Store
 from app.indexing.chunk_enricher import PROMPT_VERSION, ChunkEnricher
 from app.indexing.model_gateway import ModelGateway
+from app.indexing.qa_generator import QA_PROMPT_VERSION, QAGenerator, QASource
 from app.indexing.types import IndexedChunk, IndexedRepresentation
 from app.indexing.vector_store import MilvusVectorStore
 from app.parsing.metadata import build_document_metadata
@@ -43,6 +44,7 @@ class IngestionService:
     def __init__(self):
         self.gateway = ModelGateway()
         self.enricher = ChunkEnricher(self.gateway)
+        self.qa_generator = QAGenerator(self.gateway)
         self.vector_store = MilvusVectorStore()
         self.bm25_store = BM25Store()
 
@@ -136,6 +138,8 @@ class IngestionService:
             all_rows = [*l2_rows, *granule_rows]
             self._apply_context_prefixes(document, all_rows)
             db.commit()
+            qa_stats = await self._apply_qa_pairs(enrichment_profile, all_rows)
+            db.commit()
 
             original_vectors = await self._embed_texts(
                 profile, [self._contextual_text(row) for row in l2_rows]
@@ -183,6 +187,10 @@ class IngestionService:
                     1 for row in all_rows if row.enrichment_status == "degraded"
                 ),
                 "representations": len(representations),
+                "qa_pairs": qa_stats["qa_pairs"],
+                "qa_by_type": qa_stats["qa_by_type"],
+                "qa_degraded_chunks": qa_stats["qa_degraded_chunks"],
+                "qa_prompt_version": qa_stats["qa_prompt_version"],
                 "enrichment_model": (
                     enrichment_profile.model_name if enrichment_profile else "rules"
                 ),
@@ -314,6 +322,8 @@ class IngestionService:
                 db.commit()
                 all_rows = [*rows, *granule_rows]
                 self._apply_context_prefixes(document, all_rows)
+                db.commit()
+                await self._apply_qa_pairs(enrichment_profile, all_rows)
                 db.commit()
 
                 indexed = self._indexed_chunks(document, all_rows)
@@ -493,13 +503,16 @@ class IngestionService:
             level = getattr(row, "granularity_level", "L2")
             if level == "L1":
                 extra_items.append((row, "l1_summary", 0, self._contextual_text(row)))
-                continue
-            if level == "L3":
+            elif level == "L3":
                 extra_items.append((row, "l3_atomic", 0, self._contextual_text(row)))
-                continue
-            if row.summary:
+            elif row.summary:
                 extra_items.append((row, "summary", 0, row.summary))
-            for question_index, question in enumerate(row.hypothetical_questions or [], 1):
+            questions = [
+                str(item.get("question"))
+                for item in (getattr(row, "qa_pairs", None) or [])
+                if isinstance(item, dict) and item.get("question")
+            ] or list(row.hypothetical_questions or [])
+            for question_index, question in enumerate(questions, 1):
                 if question:
                     extra_items.append((row, "question", question_index, str(question)))
         batch_size = max(1, settings.embedding_batch_size)
@@ -550,6 +563,7 @@ class IngestionService:
                 1 for item in representations if item.chunk_id == row.id
             )
             meta["question_count"] = len(row.hypothetical_questions or [])
+            meta["qa_count"] = len(getattr(row, "qa_pairs", None) or [])
             row.enrichment_meta = meta
         return representations, representation_vectors
 
@@ -597,6 +611,64 @@ class IngestionService:
                 summary_label=summary_label,
                 summary_chars=summary_chars,
             )
+
+    async def _apply_qa_pairs(
+        self,
+        profile: ModelProfile | None,
+        rows: list[DocumentChunk],
+    ) -> dict:
+        sources = [
+            QASource(
+                chunk_id=row.id,
+                content=row.content,
+                contextual_text=self._contextual_text(row),
+                section_path=row.section_path,
+                keywords=list(row.keywords or []),
+                summary=row.summary or "",
+                granularity_level=row.granularity_level,
+            )
+            for row in rows
+        ]
+        results = await self.qa_generator.generate(profile, sources)
+        qa_by_type = {question_type: 0 for question_type in ("detail", "comparison", "summary")}
+        qa_pairs = 0
+        degraded_chunks = 0
+        for row in rows:
+            result = results[row.id]
+            row.qa_pairs = [
+                {
+                    "question": pair.question,
+                    "answer": pair.answer,
+                    "question_type": pair.question_type,
+                }
+                for pair in result.pairs
+            ]
+            row.hypothetical_questions = [pair.question for pair in result.pairs]
+            meta = dict(row.enrichment_meta or {})
+            meta.update(
+                {
+                    "qa_generated_by": result.meta.get("generated_by"),
+                    "qa_model_profile_id": result.meta.get("model_profile_id"),
+                    "qa_model_name": result.meta.get("model_name"),
+                    "qa_prompt_version": result.meta.get("prompt_version"),
+                    "qa_count": len(result.pairs),
+                    "qa_types": list(result.meta.get("qa_types") or []),
+                    "qa_degraded_reasons": list(result.meta.get("degraded_reasons") or []),
+                }
+            )
+            row.enrichment_meta = meta
+            if result.status == "degraded":
+                row.enrichment_status = "degraded"
+                degraded_chunks += 1
+            qa_pairs += len(result.pairs)
+            for pair in result.pairs:
+                qa_by_type[pair.question_type] = qa_by_type.get(pair.question_type, 0) + 1
+        return {
+            "qa_pairs": qa_pairs,
+            "qa_by_type": qa_by_type,
+            "qa_degraded_chunks": degraded_chunks,
+            "qa_prompt_version": QA_PROMPT_VERSION,
+        }
 
     def _write_indexes(
         self,

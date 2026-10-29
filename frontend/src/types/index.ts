@@ -83,8 +83,15 @@ export interface Chunk {
   summary: string;
   keywords: string[];
   hypothetical_questions: string[];
+  qa_pairs: QAPair[];
   enrichment_status: "pending" | "ready" | "degraded" | string;
   enrichment_meta: Record<string, unknown>;
+}
+
+export interface QAPair {
+  question: string;
+  answer: string;
+  question_type: "detail" | "comparison" | "summary";
 }
 
 export interface IngestionJob {
@@ -203,6 +210,7 @@ export interface SearchResult {
   parent_chunk_id: string | null;
   context_prefix: string;
   context_text: string;
+  matched_questions: string[];
   metadata: Record<string, unknown>;
   file_url: string | null;
   preview_url: string | null;

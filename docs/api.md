@@ -53,7 +53,7 @@ Authorization: Bearer <access_token>
 | DELETE | `/documents/{id}` | 删除文档与索引 |
 | GET | `/ingestion-jobs/{id}` | 入库任务状态 |
 
-分块响应额外包含 `granularity_level`（`L1/L2/L3`）、`granule_type`、`parent_chunk_id`、`context_prefix`、`summary`、`keywords`、`hypothetical_questions`、`enrichment_status` 与 `enrichment_meta`。
+分块响应额外包含 `granularity_level`（`L1/L2/L3`）、`granule_type`、`parent_chunk_id`、`context_prefix`、`summary`、`keywords`、`qa_pairs`、`hypothetical_questions`、`enrichment_status` 与 `enrichment_meta`。`qa_pairs` 元素包含 `question`、基于原文的 `answer` 和 `question_type`（`detail/comparison/summary`）。
 
 上传字段：
 
@@ -110,7 +110,7 @@ Authorization: Bearer <access_token>
 - 多知识库请求不支持通过 `document_id` 限定单个文档。
 - 会话会固定本次选择的知识库范围；更改范围需要新建会话。
 
-检索结果额外返回 `matched_representations`、`representation_scores`、`representation_ranks`、`granularity_level`、`granule_type`、`parent_chunk_id`、`context_prefix` 与 `context_text`，用于查看命中的召回路由、粒度、上下文位置和 L3 父段落关系；`vector_score/vector_rank` 继续保持为最佳向量路由的兼容字段。Search 调试接口的 `context_text` 默认等于小块正文；Chat 生成时会动态填充父窗口和邻块。
+检索结果额外返回 `matched_representations`、`matched_questions`、`representation_scores`、`representation_ranks`、`granularity_level`、`granule_type`、`parent_chunk_id`、`context_prefix` 与 `context_text`，用于查看命中的召回路由、具体生成问题、粒度、上下文位置和 L3 父段落关系；`vector_score/vector_rank` 继续保持为最佳向量路由的兼容字段。Search 调试接口的 `context_text` 默认等于小块正文；Chat 生成时会动态填充父窗口和邻块。
 
 发布接口的 `knowledge_base_ids` 是授权范围。调用时可传其子集；不传时默认查询全部已授权知识库。
 

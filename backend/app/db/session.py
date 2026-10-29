@@ -63,6 +63,8 @@ def _apply_schema_migrations() -> None:
             additions.append(("document_chunks", "parent_chunk_id", "VARCHAR(36)"))
         if "context_prefix" not in chunk_columns:
             additions.append(("document_chunks", "context_prefix", "TEXT DEFAULT ''"))
+        if "qa_pairs" not in chunk_columns:
+            additions.append(("document_chunks", "qa_pairs", "JSON DEFAULT '[]'"))
     if "conversations" in tables:
         conversation_columns = {
             column["name"] for column in inspector.get_columns("conversations")

@@ -20,6 +20,7 @@ from app.indexing.chunk_enricher import (
     fallback_keywords,
     rule_based_enrichment,
 )
+from app.indexing.qa_generator import QAPair, QAResult
 from app.services.ingestion_service import IngestionService
 
 
@@ -45,7 +46,6 @@ async def test_enricher_parses_model_output_and_bounds_fields():
             "chunk_id": "chunk-1",
             "keywords": ["糖尿病", "血糖", "糖尿病", "胰岛素"],
             "summary": "文档介绍糖尿病患者通过饮食、运动和药物控制血糖，并强调定期监测。",
-            "hypothetical_questions": ["糖尿病如何控制血糖？", "为什么要监测血糖？", "第三个问题"],
         }
     ]
     enricher = ChunkEnricher(FakeGateway(json.dumps(payload, ensure_ascii=False)))
@@ -60,7 +60,7 @@ async def test_enricher_parses_model_output_and_bounds_fields():
     assert item.summary.startswith("文档介绍")
     assert item.keywords[:3] == ["糖尿病", "血糖", "胰岛素"]
     assert 3 <= len(item.keywords) <= 10
-    assert item.hypothetical_questions == ["糖尿病如何控制血糖？", "为什么要监测血糖？"]
+    assert item.hypothetical_questions == []
     assert item.meta["prompt_version"]
 
 
@@ -78,8 +78,7 @@ async def test_enricher_falls_back_to_deterministic_rules():
     assert item.status == "degraded"
     assert item.meta["generated_by"] == "rules"
     assert item.summary
-    assert 1 <= len(item.hypothetical_questions) <= 2
-    assert all(len(question) <= 100 for question in item.hypothetical_questions)
+    assert item.hypothetical_questions == []
 
 
 def test_rule_based_summary_has_hard_limit_and_keywords_are_bm25_tokens():
@@ -218,9 +217,9 @@ async def test_backfill_preserves_chunks_and_switches_to_v2():
                 chunk_id: EnrichmentResult(
                     summary="固定摘要",
                     keywords=["固定关键词"],
-                    hypothetical_questions=[f"问题：{chunk_id}"],
+                    hypothetical_questions=[],
                     status="ready",
-                    meta={"generated_by": "model", "prompt_version": "chunk-enrichment-v1"},
+                    meta={"generated_by": "model", "prompt_version": "chunk-enrichment-v2"},
                 )
                 for chunk_id, _ in chunks
             }
@@ -234,6 +233,26 @@ async def test_backfill_preserves_chunks_and_switches_to_v2():
                     meta={"generated_by": "model", "prompt_version": "section-summary-v1"},
                 )
                 for section in sections
+            }
+
+    class BackfillQA:
+        async def generate(self, profile, sources):
+            return {
+                source.chunk_id: QAResult(
+                    pairs=[
+                        QAPair("具体参数是什么？", "参数来自原文。", "detail"),
+                        QAPair("这两个概念有什么关系？", "二者存在关联。", "comparison"),
+                        QAPair("这段内容主要概括了什么？", "核心结论来自原文。", "summary"),
+                    ],
+                    status="ready",
+                    meta={
+                        "generated_by": "model",
+                        "prompt_version": "qa-generation-v1",
+                        "qa_types": ["detail", "comparison", "summary"],
+                        "degraded_reasons": [],
+                    },
+                )
+                for source in sources
             }
 
     engine = create_engine("sqlite://")
@@ -285,6 +304,7 @@ async def test_backfill_preserves_chunks_and_switches_to_v2():
         service = IngestionService()
         service.gateway = FakeGateway("{}")
         service.enricher = BackfillEnricher()
+        service.qa_generator = BackfillQA()
         writes = []
         service._write_v2_indexes = lambda document, profile, indexed, representations, vectors: writes.append(
             (document.id, [item.chunk_id for item in representations])
@@ -302,8 +322,8 @@ async def test_backfill_preserves_chunks_and_switches_to_v2():
         assert chunk.summary == "固定摘要"
         assert kb.settings["index_version"] == "v2"
         assert writes[0][0] == "doc-1"
-        assert writes[0][1][:3] == ["chunk-1", "chunk-1", "chunk-1"]
-        assert len(writes[0][1]) == 4
+        assert writes[0][1][:5] == ["chunk-1"] * 5
+        assert len(writes[0][1]) == 9
         assert service.enricher.calls == 1
         assert service.enricher.section_calls == 2
     finally:

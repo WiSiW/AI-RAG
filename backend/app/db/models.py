@@ -139,6 +139,7 @@ class DocumentChunk(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     keywords: Mapped[list] = mapped_column(JSON, default=list)
     hypothetical_questions: Mapped[list] = mapped_column(JSON, default=list)
+    qa_pairs: Mapped[list] = mapped_column(JSON, default=list)
     enrichment_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
     enrichment_meta: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -26,7 +26,7 @@
 - 文档格式：PDF、DOCX、Markdown、EPUB
 - MinIO 原始文件存储，Celery + Redis 异步入库
 - 章节优先、token 感知、带重叠的分块
-- 分块关键词、约 50 字摘要与 1–2 个假设问题生成，失败自动规则回退
+- 分块关键词、约 50 字摘要与 3 个多样化 QA 对生成，失败自动规则回退
 - Milvus 表示行多向量索引 + Whoosh 关键词增强 BM25 索引
 - L1 章节摘要、L2 原块/摘要/问题、L3 原子块与 BM25 多路召回、加权 RRF、Rerank 精排
 - 分块语义完整性评估：规则检测、LLM 语义评分、人工抽样复核与历史运行对比
@@ -64,9 +64,9 @@ flowchart LR
 2. PostgreSQL 创建文档与任务记录，返回 `202/201 + job_id` 语义。
 3. Celery Worker 下载文件，根据格式解析文本和章节结构。
 4. 以章节为边界、按 token 大小分块，并保留重叠。
-5. 调用分块增强模型生成关键词、摘要和假设问题；模型失败时使用规则回退。
+5. 调用分块增强模型生成关键词和摘要，再独立生成详情、比较、概括三类 QA 对；模型失败时使用规则回退。
 6. 构建 L1 章节摘要、L2 常规段落和 L3 关键句/表格行/参数/错误代码原子块。
-7. 为 L1 摘要、L2 原块/摘要/问题及 L3 原子块生成 Embedding，并在 Milvus 中通过 chunk_id 关联。
+7. 为 L1/L2/L3 原表示及各自的 3 个问题生成 Embedding，并在 Milvus 中通过 chunk_id 关联。
 8. 写入 v2 Milvus/Whoosh 索引，保存增强字段和提取文本到 PostgreSQL。
 9. 前端轮询任务状态，完成后可预览和检索。
 
@@ -268,6 +268,8 @@ npm.cmd run build
 | `ZHIYUAN_RAG_PARENT_CONTEXT_TOKENS` | parent-document 命中位置前后各保留的 token 数 |
 | `ZHIYUAN_RAG_NEIGHBOR_CONTEXT_TOKENS` | 前/后邻接块追加的 token 数 |
 | `ZHIYUAN_RAG_CONTEXT_WINDOW_MAX_TOKENS` | 单个命中块动态上下文上限 |
+| `ZHIYUAN_QA_GENERATION_BATCH_SIZE` | QA 对生成批次大小，默认 4 |
+| `ZHIYUAN_QA_GENERATION_MAX_TOKENS` | QA 对生成输出上限，默认 4096 |
 
 ## 安全边界
 
@@ -314,7 +316,7 @@ npm.cmd run build
 | 粒度 | 内容 | 索引方式 | 关键元数据 |
 | --- | --- | --- | --- |
 | L1 | 每个章节/小节摘要，带章节标题 | 摘要向量 + BM25 | 父 L2 chunk ID、页码、源 token 数 |
-| L2 | 常规 512–1024 token 段落及增强表示 | BM25 + 原块/摘要/问题向量 | 章节路径、页码、关键词、假设问题 |
+| L2 | 常规 512–1024 token 段落及增强表示 | BM25 + 原块/摘要/三类问题向量 | 章节路径、页码、关键词、3 个 QA 对 |
 | L3 | 关键句、表格行、参数行、代码行、错误/异常行 | 密集向量 | `parent_chunk_id`、父 chunk 序号、页码、抽取原因 |
 
 L1 和 L2 进入 Whoosh BM25，L3 只进入 Milvus 密集向量索引。检索权重可在知识库设置中分别调整；默认 L1 为 `0.8`、L3 为 `0.6`，其余路由为 `1.0`。

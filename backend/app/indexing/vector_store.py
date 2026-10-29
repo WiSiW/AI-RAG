@@ -178,6 +178,17 @@ class MilvusVectorStore:
                         "vector_rank": len(retrieved) + 1,
                         "representation_type": hit_type,
                         "question_index": int(entity.get("question_index", 0)),
+                        **(
+                            {
+                                "matched_question": str(
+                                    entity.get(
+                                        "indexed_text" if index_version == "v2" else "text"
+                                    )
+                                )
+                            }
+                            if hit_type == "question"
+                            else {}
+                        ),
                     },
                 )
             )

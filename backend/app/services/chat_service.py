@@ -354,6 +354,7 @@ class ChatService:
             chunk.metadata["summary"] = row.summary or ""
             chunk.metadata["keywords"] = list(row.keywords or [])
             chunk.metadata["hypothetical_questions"] = list(row.hypothetical_questions or [])
+            chunk.metadata["qa_pairs"] = list(row.qa_pairs or [])
             chunk.metadata["enrichment_status"] = row.enrichment_status
             chunk.metadata["enrichment_meta"] = dict(row.enrichment_meta or {})
             chunk.metadata["granularity_level"] = row.granularity_level
@@ -501,6 +502,8 @@ class ChatService:
                 "parent_chunk_id": chunk.metadata.get("parent_chunk_id"),
                 "context_prefix": chunk.metadata.get("context_prefix", ""),
                 "context_text": chunk.context_text or chunk.content,
+                "matched_questions": list(chunk.metadata.get("matched_questions") or []),
+                "qa_pairs": list(chunk.metadata.get("qa_pairs") or []),
                 "rrf_score": chunk.rrf_score,
                 "rerank_score": chunk.rerank_score,
                 "metadata": chunk.metadata,
@@ -645,6 +648,7 @@ class ChatService:
                     parent_chunk_id=chunk.metadata.get("parent_chunk_id"),
                     context_prefix=str(chunk.metadata.get("context_prefix", "")),
                     context_text=chunk.context_text or chunk.content,
+                    matched_questions=list(chunk.metadata.get("matched_questions") or []),
                     metadata=chunk.metadata,
                     file_url=file_url,
                     preview_url=preview_url,

@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     rag_context_prefix_summary_chars: int = 120
     enrichment_batch_size: int = 8
     enrichment_max_tokens: int = 4096
+    qa_generation_batch_size: int = 4
+    qa_generation_max_tokens: int = 4096
 
     @property
     def cors_origin_list(self) -> list[str]:

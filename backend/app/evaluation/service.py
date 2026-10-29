@@ -342,6 +342,7 @@ class ChunkEvaluationService:
                         "token_count": chunk.token_count,
                         "summary": chunk.summary,
                         "keywords": list(chunk.keywords or []),
+                        "qa_pairs": list(chunk.qa_pairs or []),
                     },
                     context_snapshot={
                         **sample.context,

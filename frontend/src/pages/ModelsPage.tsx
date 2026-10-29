@@ -33,7 +33,7 @@ const kindMeta: Record<ModelKind, { label: string; description: string; icon: ty
   embedding: { label: "Embedding", description: "文档与查询向量化", icon: Database, className: "bg-cyan-50 text-cyan-700" },
   rerank: { label: "Rerank", description: "候选分块语义重排", icon: Activity, className: "bg-amber-50 text-amber-700" },
   llm: { label: "问答模型", description: "查询改写、摘要与回答生成", icon: BrainCircuit, className: "bg-violet-50 text-violet-700" },
-  enrichment: { label: "增强模型", description: "分块关键词、摘要与假设问题生成", icon: Sparkles, className: "bg-emerald-50 text-emerald-700" },
+  enrichment: { label: "增强模型", description: "分块关键词、摘要与 3 个 QA 对生成", icon: Sparkles, className: "bg-emerald-50 text-emerald-700" },
 };
 
 export default function ModelsPage() {

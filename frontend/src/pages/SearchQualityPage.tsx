@@ -162,6 +162,12 @@ export default function SearchQualityPage() {
                         <span key={route} className="chip bg-emerald-50 text-[11px] text-emerald-700">{routeLabels[route] ?? route}</span>
                       ))}
                     </div>
+                    {!!item.matched_questions?.length && (
+                      <div className="mt-2 space-y-1 rounded-lg bg-sky-50 px-2.5 py-2 text-[11px] text-sky-800">
+                        <div className="font-medium">命中的生成问题</div>
+                        {item.matched_questions.map((question) => <div key={question}>Q：{question}</div>)}
+                      </div>
+                    )}
                   </div>
                   <button type="button" onClick={() => setSelected(item)} className="btn-secondary px-3 py-2 text-xs"><ExternalLink className="h-4 w-4" />查看原文与分块</button>
                 </div>

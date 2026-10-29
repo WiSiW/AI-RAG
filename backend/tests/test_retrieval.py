@@ -1,12 +1,13 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
 from whoosh import index
 from whoosh.fields import ID, STORED, TEXT, Schema
 
 from app.indexing.bm25_store import BM25Store, ChineseTokenizer
 from app.indexing.types import IndexedChunk, RetrievedChunk
-from app.retrieval.hybrid_retriever import rrf_fuse, weighted_rrf_fuse
+from app.retrieval.hybrid_retriever import HybridRetriever, rrf_fuse, weighted_rrf_fuse
 from app.services.chat_service import resolve_search_relevance
 
 
@@ -162,3 +163,48 @@ def test_weighted_rrf_preserves_representation_route_metadata():
         "original",
         "questions",
     }
+
+
+def test_question_route_preserves_all_matched_questions():
+    results = []
+    for question in ("问题一？", "问题二？", "问题三？"):
+        item = chunk("a")
+        item.metadata["representation_type"] = "question"
+        item.metadata["matched_question"] = question
+        item.metadata["vector_score"] = 0.9
+        results.append(item)
+    results.append(chunk("b"))
+
+    unique = HybridRetriever._deduplicate_route(results, "questions")
+
+    assert [item.chunk_id for item in unique] == ["a", "b"]
+    assert unique[0].metadata["matched_questions"] == ["问题一？", "问题二？", "问题三？"]
+
+
+@pytest.mark.asyncio
+async def test_question_route_overfetches_three_times_candidate_k():
+    class FakeBM25:
+        def search(self, *args, **kwargs):
+            return []
+
+    class FakeVector:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, *args, **kwargs):
+            self.calls.append((args[2], kwargs.get("representation_type")))
+            return []
+
+    vector = FakeVector()
+    retriever = HybridRetriever(vector, FakeBM25())
+    await retriever.retrieve_routes(
+        kb_id="kb",
+        query="问题",
+        query_vector=[1.0],
+        dimensions=1,
+        candidate_top_k=10,
+        index_version="v2",
+    )
+
+    question_call = next(call for call in vector.calls if call[1] == "questions")
+    assert question_call[0] == 30

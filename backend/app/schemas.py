@@ -148,6 +148,12 @@ class DocumentDetail(DocumentRead):
     extracted_text: str
 
 
+class QAPairRead(BaseModel):
+    question: str
+    answer: str
+    question_type: Literal["detail", "comparison", "summary"]
+
+
 class ChunkRead(ORMModel):
     id: str
     document_id: str
@@ -164,6 +170,7 @@ class ChunkRead(ORMModel):
     summary: str = ""
     keywords: list[str] = Field(default_factory=list)
     hypothetical_questions: list[str] = Field(default_factory=list)
+    qa_pairs: list[QAPairRead] = Field(default_factory=list)
     enrichment_status: str = "pending"
     enrichment_meta: dict[str, Any] = Field(default_factory=dict)
 
@@ -346,6 +353,7 @@ class SearchResult(BaseModel):
     parent_chunk_id: str | None = None
     context_prefix: str = ""
     context_text: str = ""
+    matched_questions: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     file_url: str | None = None
     preview_url: str | None = None

@@ -8,7 +8,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
 import { api } from "../api/client";
 import { ErrorState, LoadingState, PageHeader, StatusBadge, formatBytes } from "../components/UI";
-import type { Chunk } from "../types";
+import type { Chunk, QAPair } from "../types";
 
 export default function DocumentPreviewPage() {
   const { documentId = "" } = useParams();
@@ -207,7 +207,11 @@ export default function DocumentPreviewPage() {
                           {chunk.keywords.map((keyword) => <span key={keyword} className="chip bg-slate-100 text-[11px] text-slate-600">{keyword}</span>)}
                         </div>
                       )}
-                      {!!chunk.hypothetical_questions?.length && (
+                      {!!chunk.qa_pairs?.length ? (
+                        <div className="mt-2 space-y-2">
+                          {chunk.qa_pairs.map((qa) => <QACard key={`${qa.question_type}-${qa.question}`} qa={qa} />)}
+                        </div>
+                      ) : !!chunk.hypothetical_questions?.length && (
                         <div className="mt-2 space-y-1 text-xs text-slate-500">
                           {chunk.hypothetical_questions.map((question) => <div key={question}><Sparkles className="mr-1 inline h-3 w-3 text-brand-500" />{question}</div>)}
                         </div>
@@ -256,6 +260,20 @@ function Metadata({ label, value, mono = false }: { label: string; value: string
   );
 }
 
+function QACard({ qa }: { qa: QAPair }) {
+  const labels = { detail: "细节", comparison: "比较/关系", summary: "概括" };
+  return (
+    <div className="rounded-lg border border-brand-100 bg-brand-50/60 px-2.5 py-2 text-xs">
+      <div className="flex items-start gap-1.5 font-medium leading-5 text-brand-900">
+        <Sparkles className="mt-1 h-3 w-3 shrink-0 text-brand-500" />
+        <span>{qa.question}</span>
+        <span className="chip ml-auto shrink-0 bg-white text-[10px] text-brand-700">{labels[qa.question_type] ?? qa.question_type}</span>
+      </div>
+      <div className="mt-1 leading-5 text-slate-600">{qa.answer}</div>
+    </div>
+  );
+}
+
 function toSearchTerms(query: string): string[] {
   return Array.from(new Set(query.toLocaleLowerCase().split(/\s+/).filter(Boolean))).slice(0, 16);
 }
@@ -274,6 +292,7 @@ function chunkSearchText(chunk: Chunk): string {
     chunk.granule_type,
     chunk.summary,
     ...(chunk.keywords ?? []),
+    ...(chunk.qa_pairs ?? []).flatMap((qa) => [qa.question, qa.answer, qa.question_type]),
     ...(chunk.hypothetical_questions ?? []),
   ].join("\n");
 }

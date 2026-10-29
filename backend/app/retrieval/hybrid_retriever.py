@@ -56,12 +56,14 @@ def weighted_rrf_fuse(
             previous_matched = list(target.metadata.get("matched_representations") or [])
             previous_scores = dict(target.metadata.get("representation_scores") or {})
             previous_ranks = dict(target.metadata.get("representation_ranks") or {})
+            previous_questions = list(target.metadata.get("matched_questions") or [])
             previous_vector_score = target.metadata.get("vector_score")
             previous_bm25_score = target.metadata.get("bm25_score")
             incoming_metadata = dict(chunk.metadata)
             incoming_matched = list(incoming_metadata.pop("matched_representations", []) or [])
             incoming_scores = dict(incoming_metadata.pop("representation_scores", {}) or {})
             incoming_ranks = dict(incoming_metadata.pop("representation_ranks", {}) or {})
+            incoming_questions = list(incoming_metadata.pop("matched_questions", []) or [])
             route_score = (
                 chunk.metadata.get("bm25_score")
                 if route_name == "bm25"
@@ -83,6 +85,11 @@ def weighted_rrf_fuse(
             route_ranks = {**previous_ranks, **incoming_ranks}
             route_ranks[route_name] = rank
             target.metadata["representation_ranks"] = route_ranks
+            matched_questions = previous_questions
+            for question in incoming_questions:
+                if question not in matched_questions:
+                    matched_questions.append(question)
+            target.metadata["matched_questions"] = matched_questions
             if route_name == "bm25":
                 target.metadata["bm25_score"] = max(
                     float(previous_bm25_score or 0), float(route_score or 0)
@@ -151,7 +158,7 @@ class HybridRetriever:
             ]
         if query_vector is not None:
             for route, representation_type in vector_routes:
-                limit = candidate_top_k * 2 if route == "questions" else candidate_top_k
+                limit = candidate_top_k * 3 if route == "questions" else candidate_top_k
                 tasks.append(
                     asyncio.to_thread(
                         self.vector_store.search,
@@ -185,15 +192,25 @@ class HybridRetriever:
         results: list[RetrievedChunk], route_name: str
     ) -> list[RetrievedChunk]:
         unique: list[RetrievedChunk] = []
-        seen: set[str] = set()
+        by_chunk_id: dict[str, RetrievedChunk] = {}
         for hit in results:
-            if hit.chunk_id in seen:
+            matched_question = str(hit.metadata.get("matched_question") or "")
+            existing = by_chunk_id.get(hit.chunk_id)
+            if existing is not None:
+                if matched_question:
+                    questions = list(existing.metadata.get("matched_questions") or [])
+                    if matched_question not in questions:
+                        questions.append(matched_question)
+                    existing.metadata["matched_questions"] = questions
                 continue
-            seen.add(hit.chunk_id)
+            by_chunk_id[hit.chunk_id] = hit
             hit.metadata["representation_type"] = route_name
             hit.metadata["vector_rank"] = len(unique) + 1
             hit.metadata["matched_representations"] = [route_name]
             hit.metadata["representation_scores"] = {route_name: float(hit.metadata.get("vector_score") or 0)}
+            hit.metadata["matched_questions"] = (
+                [matched_question] if matched_question else []
+            )
             unique.append(hit)
         return unique
 
