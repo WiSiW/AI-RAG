@@ -31,6 +31,7 @@
 - L1 章节摘要、L2 原块/摘要/问题、L3 原子块与 BM25 多路召回、加权 RRF、Rerank 精排
 - 分块语义完整性评估：规则检测、LLM 语义评分、人工抽样复核与历史运行对比
 - 知识库可移植导出/导入：文档包或含向量/BM25 快照的完整包，支持 ID 重映射和索引恢复
+- 多跳问题识别与 IRCoT 式递归检索：规则/BERT/LLM 分层判定、最多 3 轮补检索、可见检索轨迹
 - 多知识库联合检索：按 Embedding 模型分组召回、全局 RRF 融合、统一重排与跨库引用
 - 查询改写、最近窗口记忆、超长会话摘要
 - SSE 流式问答、引用解析与文档/分块回链
@@ -272,6 +273,8 @@ npm.cmd run build
 | `ZHIYUAN_RAG_CONTEXT_WINDOW_MAX_TOKENS` | 单个命中块动态上下文上限 |
 | `ZHIYUAN_QA_GENERATION_BATCH_SIZE` | QA 对生成批次大小，默认 4 |
 | `ZHIYUAN_QA_GENERATION_MAX_TOKENS` | QA 对生成输出上限，默认 4096 |
+| `ZHIYUAN_MULTIHOP_CLASSIFIER_URL` | 外部 BERT 多跳分类器地址；为空时规则+LLM 降级 |
+| `ZHIYUAN_MULTIHOP_MAX_STEPS` | 多跳检索默认最大轮数，默认 3 |
 
 ## 安全边界
 
@@ -346,6 +349,23 @@ L1 和 L2 进入 Whoosh BM25，L3 只进入 Milvus 密集向量索引。检索�
 - 导入始终创建新知识库，重新映射文档、chunk、父块和 QA 引用；名称冲突自动生成“（导入 N）”后缀。
 - ZIP 使用 manifest 与 SHA-256 校验，拒绝路径穿越、重复文件、未知版本、超限包和损坏文件。
 - 导入失败会回滚新知识库、MinIO 文件、Milvus 集合和 Whoosh 目录。
+
+## 多跳识别与递归检索
+
+- 查询改写后自动判断单跳/多跳，也可在问答页面强制自动、单跳或多跳模式。
+- 分层判定依次使用规则特征、独立 BERT 分类器和知识库增强模型；BERT 不可用时自动降级，不阻断问答。
+- 多跳问题按轮检索，规划模型根据累计证据生成下一子问题；默认最多 3 轮、每轮最多 8 个新候选。
+- 各轮结果按 chunk_id 去重，最终使用完整改写问题统一 Rerank 一次，再应用动态上下文窗口。
+- 达到最大轮数、无新增证据或规划模型失败时，在回答末尾追加信息可能不完整的提示。
+- Chat 与检索质检页面可展开查看分类来源、规则/BERT 概率、每轮子问题和停止原因。
+
+BERT 分类器为可选独立服务：
+
+```powershell
+docker compose --profile multihop up -d multihop-classifier
+```
+
+将 `ZHIYUAN_MULTIHOP_CLASSIFIER_URL` 配置为 `http://multihop-classifier:8010`。模型训练和部署说明见 `multihop_classifier/README.md`。
 
 ## 批量上传与大文件
 

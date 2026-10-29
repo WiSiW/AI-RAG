@@ -5,6 +5,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { ErrorState, LoadingState, PageHeader } from "../components/UI";
 import KnowledgeBaseSelector from "../components/KnowledgeBaseSelector";
+import RetrievalTracePanel from "../components/RetrievalTracePanel";
 import SourcePreviewModal from "../components/SourcePreviewModal";
 import type { SearchResult } from "../types";
 
@@ -41,6 +42,7 @@ export default function SearchQualityPage() {
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState("10");
   const [rerank, setRerank] = useState(true);
+  const [retrievalMode, setRetrievalMode] = useState<"auto" | "single" | "multi">("auto");
   const [selected, setSelected] = useState<SearchResult | null>(null);
 
   const kbQuery = useQuery({ queryKey: ["knowledge-bases"], queryFn: api.listKnowledgeBases });
@@ -59,6 +61,7 @@ export default function SearchQualityPage() {
       top_k: Number(topK),
       rerank,
       document_id: documentId || undefined,
+      retrieval_mode: retrievalMode,
     }),
   });
 
@@ -79,7 +82,7 @@ export default function SearchQualityPage() {
       <PageHeader title="检索质量检查" description="直接查看混合召回、统一相关度结果、RRF 与 Rerank 的分数、排名和命中文本，用于调参与定位召回问题。" />
 
       <form onSubmit={submit} className="panel p-5">
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(200px,0.8fr)_150px_160px]">
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(190px,0.7fr)_130px_150px_140px]">
           <div>
             <label className="label">知识库范围</label>
             <KnowledgeBaseSelector
@@ -97,6 +100,7 @@ export default function SearchQualityPage() {
             {kbIds.length > 1 && <div className="mt-1 text-xs text-slate-400">多库时不支持单文档筛选</div>}
           </div>
           <div><label className="label">Top K</label><input className="input" type="number" min={1} max={50} value={topK} onChange={(event) => setTopK(event.target.value)} /></div>
+          <div><label className="label">检索模式</label><select className="input" value={retrievalMode} onChange={(event) => setRetrievalMode(event.target.value as "auto" | "single" | "multi")}><option value="auto">自动</option><option value="single">单跳</option><option value="multi">多跳</option></select></div>
           <label className="flex items-center gap-2 self-end rounded-xl border border-slate-200 px-3 py-3 text-sm text-slate-700">
             <input type="checkbox" checked={rerank} onChange={(event) => setRerank(event.target.checked)} />启用重排
           </label>
@@ -112,6 +116,7 @@ export default function SearchQualityPage() {
 
       {response && (
         <div className="mt-5 space-y-5">
+          {response.retrieval_trace && <RetrievalTracePanel trace={response.retrieval_trace} />}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
             <Metric label="命中数量" value={String(response.quality.result_count)} />
             <Metric label="平均 RRF" value={score(response.quality.avg_rrf_score)} />

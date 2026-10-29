@@ -17,6 +17,7 @@ PublicationKindValue = Literal["qa", "search"]
 EvaluationGranularityValue = Literal["L1", "L2", "L3"]
 KnowledgeBaseExportMode = Literal["documents", "full"]
 KnowledgeBaseIndexPolicy = Literal["strict", "rebuild"]
+RetrievalModeValue = Literal["auto", "single", "multi"]
 
 
 def _normalize_scope(
@@ -350,6 +351,7 @@ class SearchRequest(BaseModel):
     llm_profile_id: str | None = None
     conversation_id: str | None = None
     document_id: str | None = None
+    retrieval_mode: RetrievalModeValue = "auto"
 
     @model_validator(mode="after")
     def normalize_scope(self) -> "SearchRequest":
@@ -392,6 +394,38 @@ class SearchResult(BaseModel):
     preview_url: str | None = None
 
 
+class ComplexityDecision(BaseModel):
+    is_multi_hop: bool
+    decision_source: str
+    rule_score: float = 0
+    bert_probability: float | None = None
+    llm_decision: bool | None = None
+    reason: str = ""
+    classifier_model_version: str = ""
+
+
+class MultiHopStep(BaseModel):
+    round: int
+    query: str
+    chunk_ids: list[str] = Field(default_factory=list)
+    new_chunk_count: int = 0
+    key_entities: list[str] = Field(default_factory=list)
+    need_more: bool = False
+    confidence: float | None = None
+    reason: str = ""
+
+
+class RetrievalTrace(BaseModel):
+    requested_mode: str = "auto"
+    complexity: ComplexityDecision | None = None
+    steps: list[MultiHopStep] = Field(default_factory=list)
+    stop_reason: str = ""
+    uncertain: bool = False
+    uncertainty_notice: str = ""
+    total_rounds: int = 0
+    total_chunks: int = 0
+
+
 class SearchQualitySummary(BaseModel):
     result_count: int = 0
     avg_rrf_score: float = 0
@@ -410,6 +444,7 @@ class SearchResponse(BaseModel):
     rewritten_query: str | None = None
     results: list[SearchResult]
     quality: SearchQualitySummary = Field(default_factory=SearchQualitySummary)
+    retrieval_trace: RetrievalTrace | None = None
 
 
 class ChatRequest(BaseModel):
@@ -421,6 +456,7 @@ class ChatRequest(BaseModel):
     rerank_profile_id: str | None = None
     document_id: str | None = None
     stream: bool = True
+    retrieval_mode: RetrievalModeValue = "auto"
 
     @model_validator(mode="after")
     def normalize_scope(self) -> "ChatRequest":
@@ -441,6 +477,8 @@ class ChatResponse(BaseModel):
     citations: list[Citation]
     rewritten_query: str
     usage: dict[str, Any] = Field(default_factory=dict)
+    retrieval_trace: RetrievalTrace | None = None
+    uncertainty_notice: str = ""
 
 
 class MessageRead(ORMModel):

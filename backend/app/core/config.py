@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     enrichment_max_tokens: int = 4096
     qa_generation_batch_size: int = 4
     qa_generation_max_tokens: int = 4096
+    multihop_classifier_url: str = ""
+    multihop_classifier_timeout: float = 2.0
+    multihop_classifier_high_threshold: float = 0.8
+    multihop_classifier_low_threshold: float = 0.2
+    multihop_max_steps: int = 3
+    multihop_round_top_k: int = 8
+    multihop_planner_max_tokens: int = 512
+    multihop_planner_context_tokens: int = 5000
 
     @property
     def cors_origin_list(self) -> list[str]:

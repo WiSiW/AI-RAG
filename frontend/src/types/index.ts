@@ -177,6 +177,8 @@ export interface ChatResponse {
   citations: Citation[];
   rewritten_query: string;
   usage: Record<string, unknown>;
+  retrieval_trace: RetrievalTrace | null;
+  uncertainty_notice: string;
 }
 
 export interface ModelTestResult {
@@ -234,6 +236,39 @@ export interface SearchResponse {
   rewritten_query: string | null;
   results: SearchResult[];
   quality: SearchQuality;
+  retrieval_trace: RetrievalTrace | null;
+}
+
+export interface ComplexityDecision {
+  is_multi_hop: boolean;
+  decision_source: string;
+  rule_score: number;
+  bert_probability: number | null;
+  llm_decision: boolean | null;
+  reason: string;
+  classifier_model_version: string;
+}
+
+export interface MultiHopStep {
+  round: number;
+  query: string;
+  chunk_ids: string[];
+  new_chunk_count: number;
+  key_entities: string[];
+  need_more: boolean;
+  confidence: number | null;
+  reason: string;
+}
+
+export interface RetrievalTrace {
+  requested_mode: "auto" | "single" | "multi" | string;
+  complexity: ComplexityDecision | null;
+  steps: MultiHopStep[];
+  stop_reason: string;
+  uncertain: boolean;
+  uncertainty_notice: string;
+  total_rounds: number;
+  total_chunks: number;
 }
 
 export type EvaluationStatus = "queued" | "running" | "partial" | "completed" | "failed";

@@ -315,6 +315,7 @@ export interface ChatPayload {
   rerank_profile_id?: string;
   document_id?: string;
   stream: true;
+  retrieval_mode?: "auto" | "single" | "multi";
 }
 
 export interface StreamCallbacks {

@@ -130,8 +130,11 @@ Authorization: Bearer <access_token>
 - `knowledge_base_id` 与 `knowledge_base_ids` 不能同时传递。
 - 多知识库请求不支持通过 `document_id` 限定单个文档。
 - 会话会固定本次选择的知识库范围；更改范围需要新建会话。
+- `retrieval_mode` 支持 `auto`、`single`、`multi`，默认 `auto`。
 
 检索结果额外返回 `matched_representations`、`matched_questions`、`representation_scores`、`representation_ranks`、`granularity_level`、`granule_type`、`parent_chunk_id`、`context_prefix` 与 `context_text`，用于查看命中的召回路由、具体生成问题、粒度、上下文位置和 L3 父段落关系；`vector_score/vector_rank` 继续保持为最佳向量路由的兼容字段。Search 调试接口的 `context_text` 默认等于小块正文；Chat 生成时会动态填充父窗口和邻块。
+
+Chat 和 Search 响应还返回 `retrieval_trace`，包含复杂度判定、每轮子问题、新增证据数、停止原因及不确定状态。Chat 的 `uncertainty_notice` 非空时，同一提示会追加在最终回答末尾。
 
 发布接口的 `knowledge_base_ids` 是授权范围。调用时可传其子集；不传时默认查询全部已授权知识库。
 
@@ -145,6 +148,15 @@ data: {"conversation_id":"...","knowledge_base_ids":["kb-1","kb-2"],"rewritten_q
 
 event: token
 data: {"content":"回答片段"}
+
+event: retrieval_plan
+data: {"is_multi_hop":true,"decision_source":"bert","rule_score":0.4,"bert_probability":0.87}
+
+event: retrieval_step
+data: {"round":1,"query":"...","new_chunk_count":8,"key_entities":["..."],"need_more":true}
+
+event: retrieval_done
+data: {"stop_reason":"planner_sufficient","uncertain":false,"total_rounds":2,"total_chunks":13}
 
 event: citations
 data: {"citations":[{"index":1,"knowledge_base_id":"kb-1","knowledge_base_name":"制度库","source":"制度.pdf","section":"第一章 > 1.1"}]}

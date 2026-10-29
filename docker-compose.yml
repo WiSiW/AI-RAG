@@ -113,6 +113,20 @@ services:
       - app_data:/app/data
     restart: unless-stopped
 
+  multihop-classifier:
+    profiles: ["multihop"]
+    build:
+      context: ./multihop_classifier
+    image: ai-rag-multihop-classifier:latest
+    environment:
+      MULTIHOP_MODEL_DIR: /models/complexity-classifier
+      MULTIHOP_DEVICE: cpu
+    ports:
+      - "8010:8010"
+    volumes:
+      - ./data/models:/models:ro
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend

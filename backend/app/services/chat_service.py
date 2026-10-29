@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -27,16 +28,21 @@ from app.indexing.model_gateway import ModelGateway
 from app.indexing.types import RetrievedChunk
 from app.indexing.vector_store import MilvusVectorStore
 from app.memory.session_manager import ConversationMemory
+from app.retrieval.complexity import BERTComplexityClient, classify_complexity
 from app.retrieval.context_window import (
     clip_around_anchor,
     clip_head_tokens,
     clip_tail_tokens,
 )
 from app.retrieval.hybrid_retriever import HybridRetriever, Reranker, weighted_rrf_fuse
+from app.retrieval.multihop_planner import MultiHopPlanner
 from app.schemas import (
     ChatRequest,
     ChatResponse,
     Citation,
+    ComplexityDecision,
+    MultiHopStep,
+    RetrievalTrace,
     SearchQualitySummary,
     SearchRequest,
     SearchResponse,
@@ -51,6 +57,7 @@ CitationUrlBuilder = Callable[[str], tuple[str | None, str | None]]
 class RetrievalOutcome:
     chunks: list[RetrievedChunk]
     failed_knowledge_base_ids: list[str] = field(default_factory=list)
+    trace: RetrievalTrace | None = None
 
 
 def resolve_search_relevance(
@@ -98,6 +105,8 @@ class ChatService:
         self.retriever = HybridRetriever(self.vector_store, self.bm25_store)
         self.reranker = Reranker(self.gateway)
         self.memory = ConversationMemory(self.gateway)
+        self.complexity_client = BERTComplexityClient()
+        self.multihop_planner = MultiHopPlanner(self.gateway)
 
     @staticmethod
     def _get_kbs(db: Session, kb_ids: list[str]) -> list[KnowledgeBase]:
@@ -195,7 +204,271 @@ class ChatService:
             logger.warning("query rewrite failed; using original query", exc_info=True)
             return query
 
+    @staticmethod
+    def _planner_profile(
+        db: Session, knowledge_bases: list[KnowledgeBase]
+    ) -> ModelProfile | None:
+        for knowledge_base in knowledge_bases:
+            for profile_id in (
+                getattr(knowledge_base, "enrichment_profile_id", None),
+                getattr(knowledge_base, "default_llm_profile_id", None),
+            ):
+                if not profile_id:
+                    continue
+                profile = db.get(ModelProfile, profile_id)
+                if (
+                    profile is not None
+                    and profile.is_active
+                    and profile.kind in {ModelKind.ENRICHMENT, ModelKind.LLM}
+                ):
+                    return profile
+        return None
+
     async def _retrieve(
+        self,
+        db: Session,
+        knowledge_bases: list[KnowledgeBase],
+        query: str,
+        *,
+        top_k: int | None = None,
+        rerank: bool = True,
+        rerank_profile_id: str | None = None,
+        document_id: str | None = None,
+        enforce_context_budget: bool = True,
+        expand_context: bool = False,
+        retrieval_mode: str = "single",
+    ) -> RetrievalOutcome:
+        planner_profile = self._planner_profile(db, knowledge_bases)
+        decision = await classify_complexity(
+            query,
+            retrieval_mode=retrieval_mode,
+            llm_profile=planner_profile,
+            gateway=self.gateway,
+            classifier_client=self.complexity_client,
+        )
+        if not decision.is_multi_hop:
+            outcome = await self._retrieve_single(
+                db,
+                knowledge_bases,
+                query,
+                top_k=top_k,
+                rerank=rerank,
+                rerank_profile_id=rerank_profile_id,
+                document_id=document_id,
+                enforce_context_budget=enforce_context_budget,
+                expand_context=expand_context,
+            )
+            outcome.trace = RetrievalTrace(
+                requested_mode=retrieval_mode,
+                complexity=decision,
+                stop_reason="single_hop",
+                total_rounds=1,
+                total_chunks=len(outcome.chunks),
+            )
+            return outcome
+        return await self._retrieve_multi_hop(
+            db,
+            knowledge_bases,
+            query,
+            decision=decision,
+            planner_profile=planner_profile,
+            top_k=top_k,
+            rerank=rerank,
+            rerank_profile_id=rerank_profile_id,
+            document_id=document_id,
+            enforce_context_budget=enforce_context_budget,
+            expand_context=expand_context,
+        )
+
+    async def _retrieve_multi_hop(
+        self,
+        db: Session,
+        knowledge_bases: list[KnowledgeBase],
+        query: str,
+        *,
+        decision: ComplexityDecision,
+        planner_profile: ModelProfile | None,
+        top_k: int | None,
+        rerank: bool,
+        rerank_profile_id: str | None,
+        document_id: str | None,
+        enforce_context_budget: bool,
+        expand_context: bool,
+    ) -> RetrievalOutcome:
+        kb_settings = knowledge_bases[0].settings or {}
+        max_steps = max(
+            2,
+            min(5, int(kb_settings.get("max_multi_hop_steps", settings.multihop_max_steps))),
+        )
+        round_top_k = max(
+            1,
+            int(kb_settings.get("multihop_round_top_k", settings.multihop_round_top_k)),
+        )
+        accumulated: dict[str, RetrievedChunk] = {}
+        steps: list[MultiHopStep] = []
+        failed_ids: set[str] = set()
+        prior_questions = [query]
+        prior_entities: list[str] = []
+        current_query = query
+        stop_reason = ""
+        uncertain = False
+
+        for round_number in range(1, max_steps + 1):
+            round_outcome = await self._retrieve_single(
+                db,
+                knowledge_bases,
+                current_query,
+                top_k=round_top_k,
+                rerank=False,
+                document_id=document_id,
+                enforce_context_budget=False,
+                expand_context=False,
+            )
+            failed_ids.update(round_outcome.failed_knowledge_base_ids)
+            new_count = 0
+            for chunk in round_outcome.chunks:
+                if chunk.chunk_id not in accumulated:
+                    accumulated[chunk.chunk_id] = chunk
+                    new_count += 1
+            if not accumulated:
+                stop_reason = "no_evidence"
+                uncertain = True
+                steps.append(
+                    MultiHopStep(
+                        round=round_number,
+                        query=current_query,
+                        chunk_ids=[],
+                        new_chunk_count=0,
+                        need_more=False,
+                        reason="未检索到证据",
+                    )
+                )
+                break
+            plan = await self.multihop_planner.plan(
+                profile=planner_profile,
+                original_question=query,
+                current_question=current_query,
+                round_number=round_number,
+                evidence=sorted(
+                    accumulated.values(),
+                    key=lambda item: item.rrf_score,
+                    reverse=True,
+                ),
+                prior_questions=prior_questions,
+                prior_entities=prior_entities,
+            )
+            if plan is None:
+                stop_reason = "planner_unavailable"
+                uncertain = True
+                steps.append(
+                    MultiHopStep(
+                        round=round_number,
+                        query=current_query,
+                        chunk_ids=[item.chunk_id for item in round_outcome.chunks],
+                        new_chunk_count=new_count,
+                        need_more=True,
+                        reason="规划模型调用失败",
+                    )
+                )
+                break
+            for entity in plan.key_entities:
+                if entity not in prior_entities:
+                    prior_entities.append(entity)
+            steps.append(
+                MultiHopStep(
+                    round=round_number,
+                    query=current_query,
+                    chunk_ids=[item.chunk_id for item in round_outcome.chunks],
+                    new_chunk_count=new_count,
+                    key_entities=plan.key_entities,
+                    need_more=plan.need_more,
+                    confidence=plan.confidence,
+                    reason=plan.reason,
+                )
+            )
+            if not plan.need_more:
+                stop_reason = "planner_sufficient"
+                break
+            if new_count == 0:
+                stop_reason = "no_new_evidence"
+                uncertain = True
+                break
+            if round_number >= max_steps:
+                stop_reason = "max_steps"
+                uncertain = True
+                break
+            next_query = self._normalize_query(plan.next_question)
+            if not next_query or next_query in {self._normalize_query(item) for item in prior_questions}:
+                stop_reason = "duplicate_or_empty_subquestion"
+                uncertain = True
+                break
+            if self._evidence_tokens(accumulated.values()) >= settings.rag_multi_kb_max_context_tokens:
+                stop_reason = "context_budget"
+                uncertain = True
+                break
+            current_query = plan.next_question
+            prior_questions.append(current_query)
+
+        candidates = sorted(
+            accumulated.values(), key=lambda item: item.rrf_score, reverse=True
+        )
+        final_limit = top_k or (
+            settings.rag_final_top_k
+            if len(knowledge_bases) == 1
+            else settings.rag_multi_kb_final_top_k
+        )
+        if rerank:
+            rerank_profile = self._rerank_profile(db, knowledge_bases, rerank_profile_id)
+            threshold = (
+                float((knowledge_bases[0].settings or {}).get("rerank_threshold", 0.3))
+                if len(knowledge_bases) == 1
+                else settings.rag_multi_kb_rerank_threshold
+            )
+            result = await self.reranker.rerank(
+                profile=rerank_profile,
+                query=query,
+                chunks=candidates,
+                top_k=final_limit,
+                threshold=threshold,
+            )
+        else:
+            result = candidates[:final_limit]
+        if expand_context:
+            result = self._expand_context_windows(db, result)
+        if enforce_context_budget:
+            result = self._limit_context_tokens(result)
+        if not result:
+            uncertain = True
+        notice = (
+            "注意：该问题需要多步推理，但当前资料可能不足以完整回答，以下结论仅供参考。"
+            if uncertain
+            else ""
+        )
+        trace = RetrievalTrace(
+            requested_mode="auto" if decision.decision_source != "user_override" else "multi",
+            complexity=decision,
+            steps=steps,
+            stop_reason=stop_reason or "completed",
+            uncertain=uncertain,
+            uncertainty_notice=notice,
+            total_rounds=len(steps),
+            total_chunks=len(accumulated),
+        )
+        return RetrievalOutcome(
+            chunks=result,
+            failed_knowledge_base_ids=sorted(failed_ids),
+            trace=trace,
+        )
+
+    @staticmethod
+    def _normalize_query(query: str) -> str:
+        return re.sub(r"[\s，,。.！!？?；;：:]+", "", query or "").casefold()
+
+    @staticmethod
+    def _evidence_tokens(chunks) -> int:
+        return sum(count_tokens(chunk.context_text or chunk.content) for chunk in chunks)
+
+    async def _retrieve_single(
         self,
         db: Session,
         knowledge_bases: list[KnowledgeBase],
@@ -606,6 +879,7 @@ class ChatService:
             rerank_profile_id=request.rerank_profile_id,
             document_id=request.document_id,
             enforce_context_budget=False,
+            retrieval_mode=request.retrieval_mode,
         )
         chunks = outcome.chunks
         results: list[SearchResult] = []
@@ -658,6 +932,7 @@ class ChatService:
             query=request.query,
             rewritten_query=rewritten_query if rewritten_query != request.query else None,
             results=results,
+            retrieval_trace=outcome.trace,
             quality=self._quality(
                 results,
                 request.knowledge_base_ids,
@@ -699,6 +974,7 @@ class ChatService:
             rerank_profile_id=request.rerank_profile_id,
             document_id=effective_document_id,
             expand_context=True,
+            retrieval_mode=request.retrieval_mode,
         )
         chunks = outcome.chunks
         if chunks:
@@ -712,11 +988,20 @@ class ChatService:
             )
         else:
             answer = NO_ANSWER
+        uncertainty_notice = (
+            outcome.trace.uncertainty_notice
+            if outcome.trace and outcome.trace.uncertain
+            else ""
+        )
+        if uncertainty_notice:
+            answer = f"{answer.rstrip()}\n\n{uncertainty_notice}"
         citations = self._attach_citation_urls(
             parse_citations(answer, chunks), citation_url_builder
         )
         usage = self._usage(answer, chunks, llm_profile)
         usage["failed_knowledge_base_ids"] = outcome.failed_knowledge_base_ids
+        if outcome.trace:
+            usage["retrieval_trace"] = outcome.trace.model_dump()
         message = self.memory.add_exchange(
             db,
             conversation,
@@ -736,6 +1021,8 @@ class ChatService:
             citations=citations,
             rewritten_query=rewritten_query,
             usage=usage,
+            retrieval_trace=outcome.trace,
+            uncertainty_notice=uncertainty_notice,
         )
 
     async def stream_chat(
@@ -772,8 +1059,26 @@ class ChatService:
             rerank_profile_id=request.rerank_profile_id,
             document_id=effective_document_id,
             expand_context=True,
+            retrieval_mode=request.retrieval_mode,
         )
         chunks = outcome.chunks
+        if outcome.trace:
+            yield sse_event(
+                "retrieval_plan",
+                outcome.trace.complexity.model_dump() if outcome.trace.complexity else {},
+            )
+            for step in outcome.trace.steps:
+                yield sse_event("retrieval_step", step.model_dump())
+            yield sse_event(
+                "retrieval_done",
+                {
+                    "stop_reason": outcome.trace.stop_reason,
+                    "uncertain": outcome.trace.uncertain,
+                    "total_rounds": outcome.trace.total_rounds,
+                    "total_chunks": outcome.trace.total_chunks,
+                    "uncertainty_notice": outcome.trace.uncertainty_notice,
+                },
+            )
         yield sse_event(
             "start",
             {
@@ -787,6 +1092,9 @@ class ChatService:
                 "rewritten_query": rewritten_query,
                 "context_count": len(chunks),
                 "failed_knowledge_base_ids": outcome.failed_knowledge_base_ids,
+                "retrieval_mode": request.retrieval_mode,
+                "multi_hop": bool(outcome.trace and outcome.trace.complexity and outcome.trace.complexity.is_multi_hop),
+                "uncertain": bool(outcome.trace and outcome.trace.uncertain),
             },
         )
         answer_parts: list[str] = []
@@ -805,12 +1113,24 @@ class ChatService:
             else:
                 answer_parts.append(NO_ANSWER)
                 yield sse_event("token", {"content": NO_ANSWER})
+            uncertainty_notice = (
+                outcome.trace.uncertainty_notice
+                if outcome.trace and outcome.trace.uncertain
+                else ""
+            )
+            if uncertainty_notice:
+                yield sse_event("notice", {"message": uncertainty_notice})
+                notice_chunk = f"\n\n{uncertainty_notice}"
+                answer_parts.append(notice_chunk)
+                yield sse_event("token", {"content": notice_chunk})
             answer = "".join(answer_parts)
             citations = self._attach_citation_urls(
                 parse_citations(answer, chunks), citation_url_builder
             )
             usage = self._usage(answer, chunks, llm_profile)
             usage["failed_knowledge_base_ids"] = outcome.failed_knowledge_base_ids
+            if outcome.trace:
+                usage["retrieval_trace"] = outcome.trace.model_dump()
             message = self.memory.add_exchange(
                 db,
                 conversation,
@@ -831,6 +1151,7 @@ class ChatService:
                     "conversation_id": conversation.id,
                     "message_id": message.id,
                     "usage": usage,
+                    "uncertainty_notice": uncertainty_notice,
                 },
             )
             asyncio.create_task(

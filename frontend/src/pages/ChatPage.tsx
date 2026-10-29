@@ -7,8 +7,9 @@ import remarkGfm from "remark-gfm";
 import { api, streamChat } from "../api/client";
 import CitationList from "../components/CitationList";
 import KnowledgeBaseSelector from "../components/KnowledgeBaseSelector";
+import RetrievalTracePanel from "../components/RetrievalTracePanel";
 import { ErrorState, LoadingState, PageHeader } from "../components/UI";
-import type { Citation } from "../types";
+import type { Citation, ComplexityDecision, MultiHopStep, RetrievalTrace } from "../types";
 
 interface ChatMessageView {
   id: string;
@@ -17,6 +18,8 @@ interface ChatMessageView {
   citations: Citation[];
   messageId?: string;
   streaming?: boolean;
+  retrievalTrace?: RetrievalTrace;
+  uncertaintyNotice?: string;
 }
 
 const prompts = [
@@ -49,6 +52,7 @@ export default function ChatPage() {
   const [kbIds, setKbIds] = useState<string[]>(initialKbIds);
   const [documentId, setDocumentId] = useState(documentParam);
   const [llmId, setLlmId] = useState("");
+  const [retrievalMode, setRetrievalMode] = useState<"auto" | "single" | "multi">("auto");
   const [conversationId, setConversationId] = useState(conversationParam);
   const [messages, setMessages] = useState<ChatMessageView[]>([]);
   const [input, setInput] = useState("");
@@ -106,6 +110,8 @@ export default function ChatPage() {
         content: message.content,
         citations: message.citations,
         messageId: message.role === "assistant" ? message.id : undefined,
+        retrievalTrace: (message.usage?.retrieval_trace as RetrievalTrace | undefined) ?? undefined,
+        uncertaintyNotice: (message.usage?.retrieval_trace as RetrievalTrace | undefined)?.uncertainty_notice ?? "",
       })),
     );
   }, [conversationQuery.data]);
@@ -130,6 +136,7 @@ export default function ChatPage() {
     setInput("");
     const userView: ChatMessageView = { id: `user-${Date.now()}`, role: "user", content: query, citations: [] };
     const assistantView: ChatMessageView = { id: `assistant-${Date.now()}`, role: "assistant", content: "", citations: [], streaming: true };
+    let currentTrace: RetrievalTrace | undefined;
     setMessages((current) => [...current, userView, assistantView]);
     setStreaming(true);
     const controller = new AbortController();
@@ -146,6 +153,7 @@ export default function ChatPage() {
           llm_profile_id: llmId,
           document_id: documentId || undefined,
           stream: true,
+          retrieval_mode: retrievalMode,
         },
         {
           onEvent: (eventName, data) => {
@@ -162,6 +170,37 @@ export default function ChatPage() {
                 );
                 setWarning(`部分知识库检索失败：${failedNames.join("、")}`);
               }
+            } else if (eventName === "retrieval_plan") {
+              const complexity = data as unknown as ComplexityDecision;
+              currentTrace = {
+                requested_mode: retrievalMode,
+                complexity,
+                steps: [],
+                stop_reason: "",
+                uncertain: false,
+                uncertainty_notice: "",
+                total_rounds: 0,
+                total_chunks: 0,
+              };
+              setMessages((current) => current.map((message) => message.id === assistantView.id ? { ...message, retrievalTrace: currentTrace } : message));
+            } else if (eventName === "retrieval_step") {
+              if (!currentTrace) return;
+              currentTrace = { ...currentTrace, steps: [...currentTrace.steps, data as unknown as MultiHopStep] };
+              setMessages((current) => current.map((message) => message.id === assistantView.id ? { ...message, retrievalTrace: currentTrace } : message));
+            } else if (eventName === "retrieval_done") {
+              if (!currentTrace) return;
+              currentTrace = {
+                ...currentTrace,
+                stop_reason: String(data.stop_reason ?? ""),
+                uncertain: Boolean(data.uncertain),
+                uncertainty_notice: String(data.uncertainty_notice ?? ""),
+                total_rounds: Number(data.total_rounds ?? currentTrace.steps.length),
+                total_chunks: Number(data.total_chunks ?? 0),
+              };
+              setMessages((current) => current.map((message) => message.id === assistantView.id ? { ...message, retrievalTrace: currentTrace, uncertaintyNotice: currentTrace?.uncertainty_notice } : message));
+            } else if (eventName === "notice") {
+              const notice = String(data.message ?? "");
+              setMessages((current) => current.map((message) => message.id === assistantView.id ? { ...message, uncertaintyNotice: notice } : message));
             } else if (eventName === "token") {
               answer += String(data.content ?? "");
               setMessages((current) =>
@@ -181,7 +220,7 @@ export default function ChatPage() {
               setMessages((current) =>
                 current.map((message) =>
                   message.id === assistantView.id
-                    ? { ...message, messageId, streaming: false }
+                    ? { ...message, messageId, streaming: false, retrievalTrace: currentTrace ?? message.retrievalTrace }
                     : message,
                 ),
               );
@@ -285,6 +324,14 @@ export default function ChatPage() {
                 {llmModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
               </select>
             </div>
+            <div className="mt-4">
+              <label className="label">检索模式</label>
+              <select className="input" value={retrievalMode} onChange={(event) => setRetrievalMode(event.target.value as "auto" | "single" | "multi")} disabled={streaming}>
+                <option value="auto">自动判断单跳/多跳</option>
+                <option value="single">强制单跳</option>
+                <option value="multi">强制多跳</option>
+              </select>
+            </div>
             <button type="button" onClick={newConversation} className="btn-secondary mt-4 w-full"><MessageSquarePlus className="h-4 w-4" />新建对话</button>
             <div className="mt-5 rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-500">
               <div className="mb-1 flex items-center gap-1.5 font-medium text-slate-700"><Sparkles className="h-3.5 w-3.5 text-brand-600" />跨库检索</div>
@@ -329,6 +376,8 @@ export default function ChatPage() {
                             <div className="whitespace-pre-wrap">{message.content}</div>
                           )}
                           {message.streaming && message.content && <span className="ml-1 inline-block h-4 w-1.5 animate-pulse bg-brand-500 align-middle" />}
+                          {message.role === "assistant" && message.retrievalTrace && <RetrievalTracePanel trace={message.retrievalTrace} />}
+                          {message.role === "assistant" && message.uncertaintyNotice && !message.content.includes(message.uncertaintyNotice) && <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{message.uncertaintyNotice}</div>}
                           {message.role === "assistant" && <CitationList citations={message.citations} />}
                         </div>
                         {message.role === "assistant" && message.messageId && (
