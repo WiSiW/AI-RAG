@@ -38,7 +38,7 @@ export default function AppLayout() {
   const location = useLocation();
   const title =
     Object.entries(pageTitles).find(([path]) => location.pathname.startsWith(path))?.[1] ??
-    "知源";
+    "智库";
 
   function logout() {
     clearToken();
@@ -53,7 +53,7 @@ export default function AppLayout() {
             <Boxes className="h-5 w-5" />
           </div>
           <div>
-            <div className="text-lg font-semibold tracking-wide">知源</div>
+            <div className="text-lg font-semibold tracking-wide">智库</div>
             <div className="text-xs text-slate-400">企业知识中枢</div>
           </div>
         </div>

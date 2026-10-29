@@ -165,7 +165,7 @@ Invoke-RestMethod `
 POST http://127.0.0.1:11436/v1/rerank
 ```
 
-## 6. 配置到知源项目
+## 6. 配置到智库项目
 
 进入“模型配置”，新建或编辑 Rerank 模型。
 
@@ -251,7 +251,7 @@ if (Test-Path $pidFile) {
 
 ## 8. Docker 访问与防火墙
 
-如果知源后端运行在 Docker 中，必须使用：
+如果智库后端运行在 Docker 中，必须使用：
 
 ```text
 http://host.docker.internal:11436
@@ -342,4 +342,4 @@ http://host.docker.internal:11436
 - 不是 CUDA、驱动或显存问题。
 - 使用 Ollama 自带 `llama-server.exe --rerank` 可以正常运行。
 - 已验证 `/rerank` 和 `/v1/rerank` 均可用。
-- 知源项目应将该服务配置为 Rerank 模型，而不是 LLM 或 Embedding 模型。
+- 智库项目应将该服务配置为 Rerank 模型，而不是 LLM 或 Embedding 模型。

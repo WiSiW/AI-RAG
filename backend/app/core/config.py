@@ -11,7 +11,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    app_name: str = "知源 - 企业知识中枢问答系统"
+    app_name: str = "智库 - 企业知识中枢问答系统"
     app_version: str = "0.1.0"
     environment: str = "development"
     api_prefix: str = "/api/v1"

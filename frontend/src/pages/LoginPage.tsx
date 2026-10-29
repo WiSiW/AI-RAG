@@ -38,7 +38,7 @@ export default function LoginPage() {
             <Boxes className="h-6 w-6" />
           </div>
           <div>
-            <div className="text-xl font-semibold tracking-wide">知源</div>
+            <div className="text-xl font-semibold tracking-wide">智库</div>
             <div className="text-xs text-slate-400">企业知识中枢</div>
           </div>
         </div>
@@ -74,7 +74,7 @@ export default function LoginPage() {
             <div className="grid h-10 w-10 place-items-center rounded-xl bg-ink-950 text-white">
               <Boxes className="h-5 w-5" />
             </div>
-            <div className="text-lg font-semibold text-slate-900">知源</div>
+            <div className="text-lg font-semibold text-slate-900">智库</div>
           </div>
           <h2 className="text-2xl font-semibold text-slate-950">管理员登录</h2>
           <p className="mt-2 text-sm text-slate-500">使用环境变量中配置的管理员账号登录。</p>

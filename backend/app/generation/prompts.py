@@ -1,6 +1,6 @@
 from app.indexing.types import RetrievedChunk
 
-SYSTEM_PROMPT = """你是“知源”企业知识助手。你必须严格依据提供的参考资料回答。
+SYSTEM_PROMPT = """你是“智库”企业知识助手。你必须严格依据提供的参考资料回答。
 
 规则：
 1. 只使用参考资料中的信息，不补充资料之外的事实。

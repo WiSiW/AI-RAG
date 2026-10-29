@@ -294,7 +294,7 @@ export default function ChatPage() {
 
           <section className="panel flex min-h-[72vh] flex-col overflow-hidden">
             <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5">
-              <div className="flex items-center gap-2 font-semibold text-slate-900"><Bot className="h-5 w-5 text-brand-600" />知源助手</div>
+              <div className="flex items-center gap-2 font-semibold text-slate-900"><Bot className="h-5 w-5 text-brand-600" />智库助手</div>
               {conversationId && <span className="chip bg-emerald-50 text-emerald-700">会话已保存</span>}
             </div>
 
