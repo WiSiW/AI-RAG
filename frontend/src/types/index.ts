@@ -249,10 +249,27 @@ export interface ComplexityDecision {
   classifier_model_version: string;
 }
 
+export interface TraceChunkSnapshot {
+  chunk_id: string;
+  document_id: string;
+  source: string;
+  section: string;
+  granularity_level: string;
+  granule_type: string;
+  rrf_score: number;
+  vector_score: number | null;
+  bm25_score: number | null;
+  matched_representations: string[];
+  content_snippet: string;
+}
+
 export interface MultiHopStep {
   round: number;
   query: string;
   chunk_ids: string[];
+  chunks?: TraceChunkSnapshot[];
+  route_counts?: Record<string, number>;
+  granularity_counts?: Record<string, number>;
   new_chunk_count: number;
   key_entities: string[];
   need_more: boolean;

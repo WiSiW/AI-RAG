@@ -47,6 +47,7 @@ from app.schemas import (
     SearchRequest,
     SearchResponse,
     SearchResult,
+    TraceChunkSnapshot,
 )
 
 NO_ANSWER = "根据现有资料无法回答该问题。"
@@ -334,11 +335,12 @@ class ChatService:
                 stop_reason = "no_evidence"
                 uncertain = True
                 steps.append(
-                    MultiHopStep(
-                        round=round_number,
+                    self._trace_step(
+                        round_number=round_number,
                         query=current_query,
-                        chunk_ids=[],
+                        chunks=[],
                         new_chunk_count=0,
+                        limit=round_top_k,
                         need_more=False,
                         reason="未检索到证据",
                     )
@@ -361,11 +363,12 @@ class ChatService:
                 stop_reason = "planner_unavailable"
                 uncertain = True
                 steps.append(
-                    MultiHopStep(
-                        round=round_number,
+                    self._trace_step(
+                        round_number=round_number,
                         query=current_query,
-                        chunk_ids=[item.chunk_id for item in round_outcome.chunks],
+                        chunks=round_outcome.chunks,
                         new_chunk_count=new_count,
+                        limit=round_top_k,
                         need_more=True,
                         reason="规划模型调用失败",
                     )
@@ -375,11 +378,12 @@ class ChatService:
                 if entity not in prior_entities:
                     prior_entities.append(entity)
             steps.append(
-                MultiHopStep(
-                    round=round_number,
+                self._trace_step(
+                    round_number=round_number,
                     query=current_query,
-                    chunk_ids=[item.chunk_id for item in round_outcome.chunks],
+                    chunks=round_outcome.chunks,
                     new_chunk_count=new_count,
+                    limit=round_top_k,
                     key_entities=plan.key_entities,
                     need_more=plan.need_more,
                     confidence=plan.confidence,
@@ -458,6 +462,88 @@ class ChatService:
             chunks=result,
             failed_knowledge_base_ids=sorted(failed_ids),
             trace=trace,
+        )
+
+    @staticmethod
+    def _trace_score(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _trace_chunk_snapshots(
+        cls,
+        chunks: list[RetrievedChunk],
+        *,
+        limit: int,
+    ) -> list[TraceChunkSnapshot]:
+        unique_chunks: dict[str, RetrievedChunk] = {}
+        for chunk in chunks:
+            unique_chunks.setdefault(chunk.chunk_id, chunk)
+        snapshots: list[TraceChunkSnapshot] = []
+        for chunk in list(unique_chunks.values())[:limit]:
+            metadata = chunk.metadata or {}
+            matched_representations = list(
+                dict.fromkeys(
+                    str(route)
+                    for route in (metadata.get("matched_representations") or [])
+                    if route
+                )
+            )
+            snapshots.append(
+                TraceChunkSnapshot(
+                    chunk_id=chunk.chunk_id,
+                    document_id=chunk.document_id,
+                    source=chunk.source,
+                    section=chunk.section,
+                    granularity_level=str(metadata.get("granularity_level") or "L2"),
+                    granule_type=str(metadata.get("granule_type") or "paragraph"),
+                    rrf_score=float(chunk.rrf_score or 0),
+                    vector_score=cls._trace_score(metadata.get("vector_score")),
+                    bm25_score=cls._trace_score(metadata.get("bm25_score")),
+                    matched_representations=matched_representations,
+                    content_snippet=(chunk.context_text or chunk.content or "").strip()[:240],
+                )
+            )
+        return snapshots
+
+    @classmethod
+    def _trace_step(
+        cls,
+        *,
+        round_number: int,
+        query: str,
+        chunks: list[RetrievedChunk],
+        new_chunk_count: int,
+        limit: int,
+        key_entities: list[str] | None = None,
+        need_more: bool = False,
+        confidence: float | None = None,
+        reason: str = "",
+    ) -> MultiHopStep:
+        snapshots = cls._trace_chunk_snapshots(chunks, limit=limit)
+        route_counts: dict[str, int] = {}
+        granularity_counts = {"L1": 0, "L2": 0, "L3": 0}
+        for snapshot in snapshots:
+            for route in snapshot.matched_representations:
+                route_counts[route] = route_counts.get(route, 0) + 1
+            if snapshot.granularity_level in granularity_counts:
+                granularity_counts[snapshot.granularity_level] += 1
+        return MultiHopStep(
+            round=round_number,
+            query=query,
+            chunk_ids=list(dict.fromkeys(item.chunk_id for item in chunks)),
+            chunks=snapshots,
+            route_counts=route_counts,
+            granularity_counts=granularity_counts,
+            new_chunk_count=new_chunk_count,
+            key_entities=key_entities or [],
+            need_more=need_more,
+            confidence=confidence,
+            reason=reason,
         )
 
     @staticmethod

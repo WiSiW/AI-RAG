@@ -404,10 +404,27 @@ class ComplexityDecision(BaseModel):
     classifier_model_version: str = ""
 
 
+class TraceChunkSnapshot(BaseModel):
+    chunk_id: str
+    document_id: str
+    source: str
+    section: str
+    granularity_level: str = "L2"
+    granule_type: str = "paragraph"
+    rrf_score: float = 0
+    vector_score: float | None = None
+    bm25_score: float | None = None
+    matched_representations: list[str] = Field(default_factory=list)
+    content_snippet: str = ""
+
+
 class MultiHopStep(BaseModel):
     round: int
     query: str
     chunk_ids: list[str] = Field(default_factory=list)
+    chunks: list[TraceChunkSnapshot] = Field(default_factory=list)
+    route_counts: dict[str, int] = Field(default_factory=dict)
+    granularity_counts: dict[str, int] = Field(default_factory=dict)
     new_chunk_count: int = 0
     key_entities: list[str] = Field(default_factory=list)
     need_more: bool = False
