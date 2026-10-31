@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.db.models import KnowledgeBase
 from app.db.session import SessionLocal
 from app.evaluation.service import ChunkEvaluationService
+from app.services.chunk_tuning_service import ChunkTuningService
 from app.services.ingestion_service import IngestionService
 from app.services.knowledge_base_transfer_service import KnowledgeBaseTransferService
 from app.workers.celery_app import celery_app
@@ -74,6 +75,19 @@ def evaluate_chunks_task(run_id: str) -> None:
     db = SessionLocal()
     try:
         asyncio.run(ChunkEvaluationService().run(db, run_id))
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="zhiyuan.run_chunk_tuning",
+    time_limit=12 * 60 * 60,
+    soft_time_limit=12 * 60 * 60 - 300,
+)
+def run_chunk_tuning_task(run_id: str) -> None:
+    db = SessionLocal()
+    try:
+        asyncio.run(ChunkTuningService().run(db, run_id))
     finally:
         db.close()
 

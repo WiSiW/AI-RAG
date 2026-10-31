@@ -12,15 +12,47 @@ from app.db.models import (
 from app.db.session import get_db
 from app.evaluation.service import ChunkEvaluationService
 from app.schemas import (
+    ChunkEvaluationChunkSelect,
+    ChunkEvaluationChunksPage,
     ChunkEvaluationCreate,
     ChunkEvaluationResultRead,
     ChunkEvaluationResultsPage,
+    ChunkEvaluationRetryFailed,
     ChunkEvaluationReviewUpdate,
     ChunkEvaluationRunRead,
 )
 
 router = APIRouter(prefix="/chunk-evaluations", tags=["chunk-evaluations"])
 service = ChunkEvaluationService()
+
+
+def _enqueue_run(db: Session, run: ChunkEvaluationRun) -> None:
+    try:
+        from app.workers.celery_app import celery_app
+
+        task = celery_app.send_task("zhiyuan.evaluate_chunks", args=[run.id])
+        task_id = getattr(task, "id", None)
+        if task_id:
+            run.celery_task_id = str(task_id)
+        db.commit()
+        db.refresh(run)
+    except Exception as exc:
+        run.status = EvaluationStatus.FAILED
+        run.stage = "failed"
+        run.errors = [*list(run.errors or []), {"scope": "queue", "error": str(exc)[:1000]}]
+        db.commit()
+        raise ConflictError(f"任务队列不可用：{exc}") from exc
+
+
+def _revoke_task(run: ChunkEvaluationRun) -> None:
+    if not run.celery_task_id:
+        return
+    try:
+        from app.workers.celery_app import celery_app
+
+        celery_app.control.revoke(run.celery_task_id, terminate=False)
+    except Exception:
+        return
 
 
 @router.post("", response_model=ChunkEvaluationRunRead, status_code=201)
@@ -30,15 +62,7 @@ def create_evaluation(
     db: Session = Depends(get_db),
 ) -> ChunkEvaluationRunRead:
     run = service.create_run(db, request)
-    try:
-        from app.workers.celery_app import celery_app
-
-        celery_app.send_task("zhiyuan.evaluate_chunks", args=[run.id])
-    except Exception as exc:
-        run.status = EvaluationStatus.FAILED
-        run.errors = [{"scope": "queue", "error": str(exc)[:1000]}]
-        db.commit()
-        raise ConflictError(f"任务队列不可用：{exc}") from exc
+    _enqueue_run(db, run)
     return ChunkEvaluationRunRead.model_validate(run)
 
 
@@ -83,6 +107,99 @@ def get_evaluation(
     run = db.get(ChunkEvaluationRun, run_id)
     if run is None:
         raise NotFoundError("评估运行不存在")
+    return ChunkEvaluationRunRead.model_validate(run)
+
+
+@router.post("/{run_id}/pause", response_model=ChunkEvaluationRunRead)
+def pause_evaluation(
+    run_id: str,
+    _: str = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+) -> ChunkEvaluationRunRead:
+    existing = db.get(ChunkEvaluationRun, run_id)
+    if existing is None:
+        raise NotFoundError("评估运行不存在")
+    was_queued = existing.status == EvaluationStatus.QUEUED
+    run = service.pause_run(db, run_id)
+    if was_queued:
+        _revoke_task(run)
+    return ChunkEvaluationRunRead.model_validate(run)
+
+
+@router.post("/{run_id}/resume", response_model=ChunkEvaluationRunRead)
+def resume_evaluation(
+    run_id: str,
+    _: str = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+) -> ChunkEvaluationRunRead:
+    run = service.resume_run(db, run_id)
+    _enqueue_run(db, run)
+    return ChunkEvaluationRunRead.model_validate(run)
+
+
+@router.get("/{run_id}/chunks", response_model=ChunkEvaluationChunksPage)
+def list_evaluation_chunks(
+    run_id: str,
+    document_id: str | None = None,
+    granularity: str | None = None,
+    status: str | None = None,
+    search: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    _: str = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+) -> ChunkEvaluationChunksPage:
+    items, total = service.list_chunks(
+        db,
+        run_id,
+        document_id=document_id,
+        granularity=granularity,
+        status=status,
+        search=search,
+        page=page,
+        page_size=page_size,
+    )
+    return ChunkEvaluationChunksPage(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.post("/{run_id}/chunks/select", response_model=ChunkEvaluationRunRead)
+def select_evaluation_chunks(
+    run_id: str,
+    request: ChunkEvaluationChunkSelect,
+    _: str = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+) -> ChunkEvaluationRunRead:
+    run = service.select_chunks(db, run_id, request.chunk_ids)
+    _enqueue_run(db, run)
+    return ChunkEvaluationRunRead.model_validate(run)
+
+
+@router.post("/{run_id}/chunks/{item_id}/retry", response_model=ChunkEvaluationRunRead)
+def retry_evaluation_chunk(
+    run_id: str,
+    item_id: str,
+    _: str = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+) -> ChunkEvaluationRunRead:
+    run = service.retry_item(db, run_id, item_id)
+    _enqueue_run(db, run)
+    return ChunkEvaluationRunRead.model_validate(run)
+
+
+@router.post("/{run_id}/retry-failed", response_model=ChunkEvaluationRunRead)
+def retry_failed_evaluation_chunks(
+    run_id: str,
+    request: ChunkEvaluationRetryFailed | None = None,
+    _: str = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+) -> ChunkEvaluationRunRead:
+    run = service.retry_failed(db, run_id, request or ChunkEvaluationRetryFailed())
+    _enqueue_run(db, run)
     return ChunkEvaluationRunRead.model_validate(run)
 
 
@@ -152,8 +269,8 @@ def delete_evaluation(
     run = db.get(ChunkEvaluationRun, run_id)
     if run is None:
         raise NotFoundError("评估运行不存在")
-    if run.status == EvaluationStatus.RUNNING:
-        raise ConflictError("评估运行中，无法删除")
+    if not run.can_delete:
+        raise ConflictError("运行中任务必须先暂停，暂停完成后才能删除")
     db.delete(run)
     db.commit()
     return Response(status_code=204)

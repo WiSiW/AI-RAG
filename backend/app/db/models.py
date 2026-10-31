@@ -35,9 +35,47 @@ class JobStatus(StrEnum):
 class EvaluationStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
+    PAUSING = "pausing"
+    PAUSED = "paused"
     PARTIAL = "partial"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class EvaluationStage(StrEnum):
+    QUEUED = "queued"
+    RULES_RUNNING = "rules_running"
+    LLM_RUNNING = "llm_running"
+    AGGREGATING = "aggregating"
+    PAUSING = "pausing"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class EvaluationItemStatus(StrEnum):
+    QUEUED = "queued"
+    RULES_RUNNING = "rules_running"
+    LLM_QUEUED = "llm_queued"
+    LLM_RUNNING = "llm_running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+
+class ChunkTuningStage(StrEnum):
+    SCREENING = "screening"
+    VERIFICATION = "verification"
+
+
+class ChunkTuningStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    AWAITING_SELECTION = "awaiting_selection"
+    PARTIAL = "partial"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class TransferJobKind(StrEnum):
@@ -63,6 +101,8 @@ class ModelProfile(Base):
     model_name: Mapped[str] = mapped_column(String(200))
     api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    request_timeout_seconds: Mapped[int] = mapped_column(Integer, default=1200)
+    request_max_retries: Mapped[int] = mapped_column(Integer, default=2)
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -238,6 +278,17 @@ class ChunkEvaluationRun(Base):
     status: Mapped[str] = mapped_column(
         String(20), default=EvaluationStatus.QUEUED, index=True
     )
+    stage: Mapped[str] = mapped_column(
+        String(30), default=EvaluationStage.QUEUED, index=True
+    )
+    celery_task_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    pause_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     progress: Mapped[dict] = mapped_column(JSON, default=dict)
     config_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     aggregate: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -251,6 +302,102 @@ class ChunkEvaluationRun(Base):
         back_populates="run",
         cascade="all, delete-orphan",
     )
+    items = relationship(
+        "ChunkEvaluationItem",
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="ChunkEvaluationItem.queue_position",
+    )
+
+    def _progress_int(self, key: str) -> int:
+        return int((self.progress or {}).get(key, 0) or 0)
+
+    @property
+    def batch_total(self) -> int:
+        return self._progress_int("batch_total")
+
+    @property
+    def batch_completed(self) -> int:
+        return self._progress_int("batch_completed")
+
+    @property
+    def batch_running(self) -> int:
+        return self._progress_int("batch_running")
+
+    @property
+    def chunks_total(self) -> int:
+        return self._progress_int("chunks_total")
+
+    @property
+    def chunks_succeeded(self) -> int:
+        return self._progress_int("chunks_succeeded")
+
+    @property
+    def chunks_failed(self) -> int:
+        return self._progress_int("chunks_failed")
+
+    @property
+    def chunks_pending(self) -> int:
+        return self._progress_int("chunks_pending")
+
+    @property
+    def chunks_interrupted(self) -> int:
+        return self._progress_int("chunks_interrupted")
+
+    @property
+    def chunks_not_selected(self) -> int:
+        return self._progress_int("chunks_not_selected")
+
+    @property
+    def can_pause(self) -> bool:
+        return self.status in {EvaluationStatus.QUEUED, EvaluationStatus.RUNNING}
+
+    @property
+    def can_resume(self) -> bool:
+        return self.status == EvaluationStatus.PAUSED
+
+    @property
+    def can_delete(self) -> bool:
+        return self.status in {
+            EvaluationStatus.PAUSED,
+            EvaluationStatus.PARTIAL,
+            EvaluationStatus.COMPLETED,
+            EvaluationStatus.FAILED,
+        }
+
+
+class ChunkEvaluationItem(Base):
+    __tablename__ = "chunk_evaluation_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("chunk_evaluation_runs.id", ondelete="CASCADE"), index=True
+    )
+    document_id: Mapped[str] = mapped_column(String(36), index=True)
+    chunk_id: Mapped[str] = mapped_column(String(36), index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+    granularity_level: Mapped[str] = mapped_column(String(2), index=True)
+    section_path: Mapped[str] = mapped_column(String(1000), default="正文")
+    content_snapshot: Mapped[str] = mapped_column(Text, default="")
+    selection_source: Mapped[str] = mapped_column(String(20), default="automatic")
+    queue_position: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    status: Mapped[str] = mapped_column(
+        String(20), default=EvaluationItemStatus.QUEUED, index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    rule_succeeded: Mapped[bool] = mapped_column(Boolean, default=False)
+    llm_succeeded: Mapped[bool] = mapped_column(Boolean, default=False)
+    fallback_applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    run = relationship("ChunkEvaluationRun", back_populates="items")
 
 
 class ChunkEvaluationResult(Base):
@@ -287,6 +434,171 @@ class ChunkEvaluationResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     run = relationship("ChunkEvaluationRun", back_populates="results")
+
+
+class RetrievalEvaluationDataset(Base):
+    __tablename__ = "retrieval_evaluation_datasets"
+    __table_args__ = (
+        UniqueConstraint("kb_id", "name", name="uq_retrieval_eval_dataset_kb_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    kb_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+    document_ids: Mapped[list] = mapped_column(JSON, default=list)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    cases = relationship(
+        "RetrievalEvaluationCase",
+        back_populates="dataset",
+        cascade="all, delete-orphan",
+        order_by="RetrievalEvaluationCase.sort_order",
+    )
+
+
+class RetrievalEvaluationCase(Base):
+    __tablename__ = "retrieval_evaluation_cases"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    dataset_id: Mapped[str] = mapped_column(
+        ForeignKey("retrieval_evaluation_datasets.id", ondelete="CASCADE"),
+        index=True,
+    )
+    question: Mapped[str] = mapped_column(Text)
+    normalized_question: Mapped[str] = mapped_column(Text, index=True)
+    reference_answer: Mapped[str] = mapped_column(Text, default="")
+    question_type: Mapped[str] = mapped_column(String(30), default="detail", index=True)
+    answerable: Mapped[bool] = mapped_column(Boolean, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    dataset = relationship("RetrievalEvaluationDataset", back_populates="cases")
+    evidence = relationship(
+        "RetrievalEvaluationEvidence",
+        back_populates="case",
+        cascade="all, delete-orphan",
+        order_by="RetrievalEvaluationEvidence.created_at",
+    )
+
+
+class RetrievalEvaluationEvidence(Base):
+    __tablename__ = "retrieval_evaluation_evidence"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    case_id: Mapped[str] = mapped_column(
+        ForeignKey("retrieval_evaluation_cases.id", ondelete="CASCADE"),
+        index=True,
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    quote: Mapped[str] = mapped_column(Text)
+    normalized_quote: Mapped[str] = mapped_column(Text)
+    char_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    char_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    section_path: Mapped[str] = mapped_column(String(1000), default="正文")
+    page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    case = relationship("RetrievalEvaluationCase", back_populates="evidence")
+
+
+class ChunkTuningRun(Base):
+    __tablename__ = "chunk_tuning_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    parent_run_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    kb_id: Mapped[str] = mapped_column(String(36), index=True)
+    dataset_id: Mapped[str] = mapped_column(String(36), index=True)
+    dataset_version: Mapped[int] = mapped_column(Integer, default=1)
+    stage: Mapped[str] = mapped_column(String(20), index=True)
+    status: Mapped[str] = mapped_column(
+        String(30), default=ChunkTuningStatus.QUEUED, index=True
+    )
+    config_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    dataset_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    progress: Mapped[dict] = mapped_column(JSON, default=dict)
+    aggregate: Mapped[dict] = mapped_column(JSON, default=dict)
+    errors: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    trials = relationship(
+        "ChunkTuningTrial",
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="ChunkTuningTrial.created_at",
+    )
+
+
+class ChunkTuningTrial(Base):
+    __tablename__ = "chunk_tuning_trials"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("chunk_tuning_runs.id", ondelete="CASCADE"), index=True
+    )
+    label: Mapped[str] = mapped_column(String(120), default="")
+    index_namespace: Mapped[str] = mapped_column(String(80), unique=True)
+    chunk_mode: Mapped[str] = mapped_column(String(40), default="structure")
+    chunk_size: Mapped[int] = mapped_column(Integer)
+    chunk_overlap: Mapped[int] = mapped_column(Integer)
+    overlap_ratio: Mapped[float] = mapped_column(Float, default=0)
+    is_baseline: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    status: Mapped[str] = mapped_column(
+        String(30), default=ChunkTuningStatus.QUEUED, index=True
+    )
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    cost: Mapped[dict] = mapped_column(JSON, default=dict)
+    errors: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    run = relationship("ChunkTuningRun", back_populates="trials")
+    case_results = relationship(
+        "ChunkTuningCaseResult",
+        back_populates="trial",
+        cascade="all, delete-orphan",
+    )
+
+
+class ChunkTuningCaseResult(Base):
+    __tablename__ = "chunk_tuning_case_results"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    trial_id: Mapped[str] = mapped_column(
+        ForeignKey("chunk_tuning_trials.id", ondelete="CASCADE"), index=True
+    )
+    case_id: Mapped[str] = mapped_column(String(36), index=True)
+    question: Mapped[str] = mapped_column(Text)
+    question_type: Mapped[str] = mapped_column(String(30), default="detail", index=True)
+    answerable: Mapped[bool] = mapped_column(Boolean, default=True)
+    reference_answer: Mapped[str] = mapped_column(Text, default="")
+    recall_at_5: Mapped[float] = mapped_column(Float, default=0)
+    recall_at_10: Mapped[float] = mapped_column(Float, default=0)
+    all_evidence_hit_at_5: Mapped[bool] = mapped_column(Boolean, default=False)
+    all_evidence_hit_at_10: Mapped[bool] = mapped_column(Boolean, default=False)
+    reciprocal_rank: Mapped[float] = mapped_column(Float, default=0)
+    evidence_density: Mapped[float] = mapped_column(Float, default=0)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0)
+    evidence_results: Mapped[list] = mapped_column(JSON, default=list)
+    retrieved_hits: Mapped[list] = mapped_column(JSON, default=list)
+    answer: Mapped[str] = mapped_column(Text, default="")
+    quality_scores: Mapped[dict] = mapped_column(JSON, default=dict)
+    errors: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    trial = relationship("ChunkTuningTrial", back_populates="case_results")
 
 
 class KnowledgeBaseTransferJob(Base):

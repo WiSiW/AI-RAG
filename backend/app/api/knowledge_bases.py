@@ -9,6 +9,8 @@ from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.security import get_current_admin
 from app.core.storage import delete_object
 from app.db.models import (
+    ChunkTuningRun,
+    ChunkTuningStatus,
     Conversation,
     Document,
     DocumentStatus,
@@ -264,6 +266,16 @@ def delete_knowledge_base(
     )
     if active_count:
         raise ConflictError("知识库仍有待处理文档，请稍后再试")
+    tuning_active = db.scalar(
+        select(ChunkTuningRun.id).where(
+            ChunkTuningRun.kb_id == kb_id,
+            ChunkTuningRun.status.in_(
+                [ChunkTuningStatus.QUEUED, ChunkTuningStatus.RUNNING]
+            ),
+        )
+    )
+    if tuning_active:
+        raise ConflictError("知识库仍有分块调优任务，请稍后再试")
     for publication in db.scalars(select(PublishedApi)):
         if kb_id in (publication.knowledge_base_ids or []):
             raise ConflictError(f"知识库正被发布接口“{publication.name}”使用，无法删除")

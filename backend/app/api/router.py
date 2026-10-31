@@ -4,6 +4,7 @@ from app.api import (
     auth,
     chat,
     chunk_evaluations,
+    chunk_tuning,
     conversations,
     documents,
     feedback,
@@ -28,6 +29,7 @@ api_router.include_router(knowledge_base_transfers.router)
 api_router.include_router(documents.router)
 api_router.include_router(chat.router)
 api_router.include_router(chunk_evaluations.router)
+api_router.include_router(chunk_tuning.router)
 api_router.include_router(conversations.router)
 api_router.include_router(feedback.router)
 api_router.include_router(publications.router)

@@ -64,6 +64,8 @@ def create_profile(
         model_name=request.model_name,
         api_key_encrypted=encrypt_secret(request.api_key),
         dimensions=request.dimensions,
+        request_timeout_seconds=request.request_timeout_seconds,
+        request_max_retries=request.request_max_retries,
         config=request.config,
         is_active=request.is_active,
     )
@@ -88,9 +90,21 @@ def update_profile(
     if profile is None:
         raise NotFoundError("模型配置不存在")
     fields = request.model_fields_set
-    for field in ("name", "provider", "base_url", "model_name", "dimensions", "config", "is_active"):
+    for field in (
+        "name",
+        "provider",
+        "base_url",
+        "model_name",
+        "dimensions",
+        "request_timeout_seconds",
+        "request_max_retries",
+        "config",
+        "is_active",
+    ):
         if field in fields:
             value = getattr(request, field)
+            if value is None and field in {"request_timeout_seconds", "request_max_retries"}:
+                continue
             if field == "base_url" and value:
                 value = value.rstrip("/")
             setattr(profile, field, value)

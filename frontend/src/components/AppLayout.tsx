@@ -10,6 +10,7 @@ import {
   Plus,
   ScanText,
   Settings2,
+  SlidersHorizontal,
   UploadCloud,
 } from "lucide-react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
@@ -24,6 +25,7 @@ const navItems = [
   { to: "/parsing-engines", label: "解析引擎", icon: ScanText },
   { to: "/search-quality", label: "检索质检", icon: Search },
   { to: "/chunk-evaluations", label: "分块评估", icon: ClipboardCheck },
+  { to: "/chunk-tuning", label: "分块调优", icon: SlidersHorizontal },
   { to: "/api-publishing", label: "API 发布", icon: Code2 },
 ];
 
@@ -36,6 +38,7 @@ const pageTitles: Record<string, string> = {
   "/parsing-engines": "解析引擎",
   "/search-quality": "检索质检",
   "/chunk-evaluations": "分块评估",
+  "/chunk-tuning": "分块调优",
   "/api-publishing": "API 发布",
 };
 

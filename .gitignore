@@ -31,3 +31,7 @@ Thumbs.db
 # Local model weights
 multihop_classifier/models/
 
+# Local pytest temporary directories
+.pytest-tmp/
+.pytest-runtime-*/
+.pytest-cache/

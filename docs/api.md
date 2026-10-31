@@ -27,6 +27,8 @@ Authorization: Bearer <access_token>
 
 `kind` 支持 `embedding`、`rerank`、`llm`、`enrichment`。分块增强模型使用 OpenAI-compatible Chat Completions 接口。
 
+LLM 与增强模型支持 `request_timeout_seconds`（默认 `1200` 秒）和 `request_max_retries`（默认 `2`，表示首次请求后的额外重试次数，最多共 3 次请求）。模型页面以分钟展示超时时间；Embedding 与 Rerank 继续使用全局请求超时。
+
 ## 知识库
 
 | 方法 | 路径 | 说明 |
@@ -91,6 +93,87 @@ Authorization: Bearer <access_token>
 - `granularities`：可选 `L1/L2/L3`，默认全部。
 - `judge_profile_id`：可选，默认使用知识库增强模型；支持启用的 LLM 或增强模型。
 - `llm_enabled`：默认 `true`；关闭时只执行规则评估。
+
+## 分块大小与重叠窗口调优
+
+### 检索评测集
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/retrieval-evaluation-datasets` | 按知识库查询评测集 |
+| POST | `/retrieval-evaluation-datasets` | 创建单知识库评测集 |
+| GET | `/retrieval-evaluation-datasets/{id}` | 查询评测集和问题 |
+| PATCH | `/retrieval-evaluation-datasets/{id}` | 修改名称、说明或文档范围 |
+| DELETE | `/retrieval-evaluation-datasets/{id}` | 删除评测集，历史运行快照保留 |
+| POST | `/retrieval-evaluation-datasets/{id}/cases` | 新增问题、标准答案和黄金证据 |
+| PATCH | `/retrieval-evaluation-datasets/{id}/cases/{case_id}` | 替换问题和证据 |
+| DELETE | `/retrieval-evaluation-datasets/{id}/cases/{case_id}` | 删除问题 |
+| POST | `/retrieval-evaluation-datasets/{id}/import` | 以 JSONL 原子导入问题 |
+| GET | `/retrieval-evaluation-datasets/{id}/export` | 导出 UTF-8 JSONL |
+
+创建评测集的 `document_ids` 必须属于同一知识库且文档状态为 `ready`。问题类型支持
+`detail/comparison/summary/reasoning/table/code/no_answer`；除 `no_answer` 外必须提供标准答案和至少一条黄金证据。
+
+黄金证据字段：
+
+- `document_id`：证据所在文档。
+- `quote`：从原文划选的最小充分片段，不超过 300 token。
+- `section_path`：章节路径，默认“正文”。
+- `page_start`、`page_end`：可选页码。
+
+服务端会忽略空白差异定位 `quote` 并保存字符区间；无法在原文定位的证据会被拒绝。
+
+JSONL 第一行可为数据集元信息，后续每行一条问题，所有行均带 `schema_version: 1`。任何一行校验失败时整批不导入。
+
+### 调优运行
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/chunk-tuning-runs` | 创建快速筛选运行 |
+| GET | `/chunk-tuning-runs` | 查询运行历史 |
+| GET | `/chunk-tuning-runs/{id}` | 查询运行、进度、聚合和 trial |
+| GET | `/chunk-tuning-runs/{id}/trials` | 查询 trial |
+| GET | `/chunk-tuning-runs/{id}/results` | 分页查询逐题检索/答案结果 |
+| POST | `/chunk-tuning-runs/{id}/verifications` | 对勾选 trial 创建深度验证 |
+| POST | `/chunk-tuning-runs/{id}/cancel` | 请求取消运行 |
+| POST | `/chunk-tuning-runs/{id}/apply` | 保存 trial 参数为知识库默认值 |
+| DELETE | `/chunk-tuning-runs/{id}` | 删除运行并清理临时索引 |
+
+创建快速筛选：
+
+```json
+{
+  "knowledge_base_id": "kb-id",
+  "dataset_id": "dataset-id",
+  "chunk_sizes": [256, 512, 1024, 1536],
+  "overlap_ratios": [0, 10, 20, 25]
+}
+```
+
+重叠按 `round(chunk_size × ratio / 100)` 转为实际 token 数，矩阵最多 25 组。运行要求至少 20 条可回答问题；建议使用 50–100 条分层数据。系统额外保留当前知识库参数作为基线 trial。
+
+快速筛选使用隔离的 L2 原文向量和 BM25，固定单跳、关闭 Rerank；深度验证使用完整 L1/L2/L3 多表示索引、固定 RRF/Rerank/LLM 及每候选最多 30 条分层答案评测。临时索引命名空间为 `eval-*`，不会写入生产 Milvus/Whoosh。
+
+`apply` 只接受深度验证中状态为 `completed` 的 trial，仅写回：
+
+```json
+{
+  "chunk_mode": "structure",
+  "chunk_size": 512,
+  "chunk_overlap": 64,
+  "last_chunk_tuning": {"run_id": "...", "trial_id": "...", "applied_at": "..."}
+}
+```
+
+不会自动重分块或重建现有文档。
+
+### 显式重建现有文档
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/knowledge-bases/{kb_id}/chunk-settings/reindex` | 更新选中文档参数并批量排队重建 |
+
+请求字段为 `document_ids`、`chunk_mode`、`chunk_size`、`chunk_overlap`。接口返回 `queued`、`skipped` 和 `job_ids`；处理中的文档会跳过。该操作会替换文档的生产分块和索引，页面必须二次确认。
 
 ## 知识库导出与导入
 

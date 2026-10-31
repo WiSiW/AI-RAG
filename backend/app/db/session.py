@@ -31,6 +31,18 @@ def _apply_schema_migrations() -> None:
             additions.append(("documents", "metadata_json", "JSON DEFAULT '{}'"))
         if "chunk_mode" not in document_columns:
             additions.append(("documents", "chunk_mode", "VARCHAR(40) DEFAULT 'structure'"))
+    if "model_profiles" in tables:
+        model_columns = {
+            column["name"] for column in inspector.get_columns("model_profiles")
+        }
+        if "request_timeout_seconds" not in model_columns:
+            additions.append(
+                ("model_profiles", "request_timeout_seconds", "INTEGER DEFAULT 1200")
+            )
+        if "request_max_retries" not in model_columns:
+            additions.append(
+                ("model_profiles", "request_max_retries", "INTEGER DEFAULT 2")
+            )
     if "knowledge_bases" in tables:
         knowledge_base_columns = {
             column["name"] for column in inspector.get_columns("knowledge_bases")
@@ -65,6 +77,22 @@ def _apply_schema_migrations() -> None:
             additions.append(("document_chunks", "context_prefix", "TEXT DEFAULT ''"))
         if "qa_pairs" not in chunk_columns:
             additions.append(("document_chunks", "qa_pairs", "JSON DEFAULT '[]'"))
+    if "chunk_evaluation_runs" in tables:
+        evaluation_columns = {
+            column["name"] for column in inspector.get_columns("chunk_evaluation_runs")
+        }
+        if "stage" not in evaluation_columns:
+            additions.append(
+                ("chunk_evaluation_runs", "stage", "VARCHAR(30) DEFAULT 'queued'")
+            )
+        if "celery_task_id" not in evaluation_columns:
+            additions.append(("chunk_evaluation_runs", "celery_task_id", "VARCHAR(100)"))
+        if "pause_requested_at" not in evaluation_columns:
+            additions.append(("chunk_evaluation_runs", "pause_requested_at", "TIMESTAMP"))
+        if "paused_at" not in evaluation_columns:
+            additions.append(("chunk_evaluation_runs", "paused_at", "TIMESTAMP"))
+        if "heartbeat_at" not in evaluation_columns:
+            additions.append(("chunk_evaluation_runs", "heartbeat_at", "TIMESTAMP"))
     if "conversations" in tables:
         conversation_columns = {
             column["name"] for column in inspector.get_columns("conversations")
@@ -74,6 +102,20 @@ def _apply_schema_migrations() -> None:
     with engine.begin() as connection:
         for table, column, ddl in additions:
             connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+        if "chunk_evaluation_runs" in tables:
+            connection.execute(
+                text(
+                    """
+                    UPDATE chunk_evaluation_runs
+                    SET stage = CASE
+                        WHEN status = 'completed' THEN 'completed'
+                        WHEN status = 'failed' THEN 'failed'
+                        ELSE 'queued'
+                    END
+                    WHERE stage IS NULL OR stage = ''
+                    """
+                )
+            )
         if "conversation_knowledge_bases" in tables and "conversations" in tables:
             connection.execute(
                 text(

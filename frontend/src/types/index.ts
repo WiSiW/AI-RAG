@@ -23,6 +23,8 @@ export interface ModelProfile {
   base_url: string;
   model_name: string;
   dimensions: number | null;
+  request_timeout_seconds: number;
+  request_max_retries: number;
   config: Record<string, unknown>;
   is_active: boolean;
   has_api_key: boolean;
@@ -359,7 +361,7 @@ export interface RetrievalTrace {
   total_chunks: number;
 }
 
-export type EvaluationStatus = "queued" | "running" | "partial" | "completed" | "failed";
+export type EvaluationStatus = "queued" | "running" | "pausing" | "paused" | "partial" | "completed" | "failed";
 
 export interface ChunkEvaluationRun {
   id: string;
@@ -370,6 +372,23 @@ export interface ChunkEvaluationRun {
   judge_profile_id: string | null;
   llm_enabled: boolean;
   status: EvaluationStatus;
+  stage: string;
+  celery_task_id: string | null;
+  pause_requested_at: string | null;
+  paused_at: string | null;
+  heartbeat_at: string | null;
+  batch_total: number;
+  batch_completed: number;
+  batch_running: number;
+  chunks_total: number;
+  chunks_succeeded: number;
+  chunks_failed: number;
+  chunks_pending: number;
+  chunks_interrupted: number;
+  chunks_not_selected: number;
+  can_pause: boolean;
+  can_resume: boolean;
+  can_delete: boolean;
   progress: Record<string, unknown>;
   config_snapshot: Record<string, unknown>;
   aggregate: Record<string, unknown>;
@@ -377,6 +396,35 @@ export interface ChunkEvaluationRun {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+export interface ChunkEvaluationChunk {
+  id: string | null;
+  run_id: string;
+  document_id: string;
+  chunk_id: string;
+  chunk_index: number;
+  granularity_level: string;
+  section_path: string;
+  content_snapshot: string;
+  status: string;
+  selection_source: string;
+  queue_position: number | null;
+  attempt_count: number;
+  rule_succeeded: boolean;
+  llm_succeeded: boolean;
+  fallback_applied: boolean;
+  error: string | null;
+  result_id: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface ChunkEvaluationChunksPage {
+  items: ChunkEvaluationChunk[];
+  total: number;
+  page: number;
+  page_size: number;
 }
 
 export interface ChunkEvaluationResult {
@@ -414,6 +462,189 @@ export interface ChunkEvaluationResultsPage {
   total: number;
   page: number;
   page_size: number;
+}
+
+export type EvaluationQuestionType =
+  | "detail"
+  | "comparison"
+  | "summary"
+  | "reasoning"
+  | "table"
+  | "code"
+  | "no_answer";
+
+export interface RetrievalEvaluationEvidence {
+  id: string;
+  case_id: string;
+  document_id: string;
+  quote: string;
+  normalized_quote: string;
+  char_start: number | null;
+  char_end: number | null;
+  section_path: string;
+  page_start: number | null;
+  page_end: number | null;
+  created_at: string;
+}
+
+export interface RetrievalEvaluationCase {
+  id: string;
+  dataset_id: string;
+  question: string;
+  normalized_question: string;
+  reference_answer: string;
+  question_type: EvaluationQuestionType;
+  answerable: boolean;
+  sort_order: number;
+  evidence: RetrievalEvaluationEvidence[];
+  created_at: string;
+}
+
+export interface RetrievalEvaluationDataset {
+  id: string;
+  kb_id: string;
+  name: string;
+  description: string;
+  document_ids: string[];
+  version: number;
+  cases: RetrievalEvaluationCase[];
+  case_count: number;
+  answerable_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ChunkTuningStage = "screening" | "verification";
+export type ChunkTuningStatus =
+  | "queued"
+  | "running"
+  | "awaiting_selection"
+  | "partial"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface ChunkTuningMetrics {
+  answerable_cases?: number;
+  no_answer_cases?: number;
+  recall_at_5?: number;
+  recall_at_10?: number;
+  all_evidence_hit_at_5?: number;
+  all_evidence_hit_at_10?: number;
+  mrr_at_10?: number;
+  evidence_density?: number;
+  latency_p50_ms?: number;
+  latency_p95_ms?: number;
+  recall_at_5_ci?: [number, number];
+  recall_at_10_ci?: [number, number];
+  baseline_delta?: {
+    recall_at_5?: number;
+    recall_at_10?: number;
+    evidence_density?: number;
+    latency_p95_ms?: number;
+    recall_at_5_ci?: [number, number];
+    recall_at_10_ci?: [number, number];
+  };
+  question_types?: Record<string, { case_count: number; recall_at_5: number; recall_at_10: number }>;
+  quality?: {
+    case_count?: number;
+    faithfulness?: number;
+    completeness?: number;
+    cited_gold_chunk_ratio?: number;
+  };
+}
+
+export interface ChunkTuningCost {
+  candidate_chunk_count?: number;
+  representation_count?: number;
+  index_tokens?: number;
+  representation_tokens?: number;
+  estimated_vector_bytes?: number;
+  build_time_ms?: number;
+  degraded_rows?: number;
+}
+
+export interface ChunkTuningTrial {
+  id: string;
+  run_id: string;
+  label: string;
+  index_namespace: string;
+  chunk_mode: string;
+  chunk_size: number;
+  chunk_overlap: number;
+  overlap_ratio: number;
+  is_baseline: boolean;
+  status: ChunkTuningStatus;
+  metrics: ChunkTuningMetrics;
+  cost: ChunkTuningCost;
+  errors: Array<Record<string, unknown>>;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface ChunkTuningRun {
+  id: string;
+  parent_run_id: string | null;
+  kb_id: string;
+  dataset_id: string;
+  dataset_version: number;
+  stage: ChunkTuningStage;
+  status: ChunkTuningStatus;
+  config_snapshot: Record<string, unknown>;
+  dataset_snapshot: Record<string, unknown>;
+  progress: Record<string, unknown>;
+  aggregate: {
+    trial_count?: number;
+    completed_trial_count?: number;
+    partial_trial_count?: number;
+    failed_trial_count?: number;
+    pareto_trial_ids?: string[];
+    recommended_trial_ids?: string[];
+    baseline_trial_id?: string | null;
+    answerable_case_count?: number;
+  };
+  errors: Array<Record<string, unknown>>;
+  trials: ChunkTuningTrial[];
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface ChunkTuningCaseResult {
+  id: string;
+  trial_id: string;
+  case_id: string;
+  question: string;
+  question_type: EvaluationQuestionType;
+  answerable: boolean;
+  reference_answer: string;
+  recall_at_5: number;
+  recall_at_10: number;
+  all_evidence_hit_at_5: boolean;
+  all_evidence_hit_at_10: boolean;
+  reciprocal_rank: number;
+  evidence_density: number;
+  latency_ms: number;
+  evidence_results: Array<Record<string, unknown>>;
+  retrieved_hits: Array<Record<string, unknown>>;
+  answer: string;
+  quality_scores: Record<string, unknown>;
+  errors: Array<Record<string, unknown>>;
+  created_at: string;
+}
+
+export interface ChunkTuningCaseResultsPage {
+  items: ChunkTuningCaseResult[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ChunkSettingsReindexResponse {
+  queued: number;
+  skipped: number;
+  job_ids: string[];
 }
 
 export interface KnowledgeBaseTransferJob {

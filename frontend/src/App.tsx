@@ -4,6 +4,7 @@ import AppLayout from "./components/AppLayout";
 import ApiPublishingPage from "./pages/ApiPublishingPage";
 import ChatPage from "./pages/ChatPage";
 import ChunkEvaluationPage from "./pages/ChunkEvaluationPage";
+import ChunkTuningPage from "./pages/ChunkTuningPage";
 import DocumentPreviewPage from "./pages/DocumentPreviewPage";
 import HistoryPage from "./pages/HistoryPage";
 import KnowledgeBaseDetailPage from "./pages/KnowledgeBaseDetailPage";
@@ -33,6 +34,7 @@ export default function App() {
         <Route path="/parsing-engines" element={<ParsingEnginesPage />} />
         <Route path="/search-quality" element={<SearchQualityPage />} />
         <Route path="/chunk-evaluations" element={<ChunkEvaluationPage />} />
+        <Route path="/chunk-tuning" element={<ChunkTuningPage />} />
         <Route path="/api-publishing" element={<ApiPublishingPage />} />
         <Route path="/chat" element={<ChatPage />} />
         <Route path="/history" element={<HistoryPage />} />

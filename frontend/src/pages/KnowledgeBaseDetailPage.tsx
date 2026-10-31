@@ -1,6 +1,6 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Bot, Download, FileText, Pencil, RefreshCw, ScanText, Search, Trash2, UploadCloud } from "lucide-react";
+import { ArrowLeft, Bot, Download, FileText, Pencil, RefreshCw, ScanText, Search, SlidersHorizontal, Trash2, UploadCloud } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api, downloadKnowledgeBasePackage } from "../api/client";
 import { EmptyState, ErrorState, LoadingState, Modal, PageHeader, StatusBadge, formatBytes, formatDate } from "../components/UI";
@@ -199,6 +199,7 @@ export default function KnowledgeBaseDetailPage() {
             </button>
             <Link to={`/upload?kb=${kb.id}`} className="btn-primary"><UploadCloud className="h-4 w-4" />上传文档</Link>
             <Link to={`/search-quality?kb=${kb.id}`} className="btn-secondary"><Search className="h-4 w-4" />检索质检</Link>
+              <Link to={`/chunk-tuning?kb=${kb.id}`} className="btn-secondary"><SlidersHorizontal className="h-4 w-4" />分块调优</Link>
             <Link to={`/chat?kb=${kb.id}`} className="btn-secondary"><Bot className="h-4 w-4" />开始问答</Link>
           </div>
         }

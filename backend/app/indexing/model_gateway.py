@@ -32,11 +32,15 @@ class ModelGateway:
 
     @staticmethod
     def _openai_client(profile: ModelProfile) -> AsyncOpenAI:
-        return AsyncOpenAI(
-            api_key=ModelGateway._api_key(profile),
-            base_url=profile.base_url.rstrip("/"),
-            timeout=settings.model_request_timeout,
-        )
+        options = {
+            "api_key": ModelGateway._api_key(profile),
+            "base_url": profile.base_url.rstrip("/"),
+            "timeout": settings.model_request_timeout,
+        }
+        if profile.kind in {"llm", "enrichment"}:
+            options["timeout"] = int(profile.request_timeout_seconds or 1200)
+            options["max_retries"] = int(profile.request_max_retries or 0)
+        return AsyncOpenAI(**options)
 
     async def embed_texts(self, profile: ModelProfile, texts: list[str]) -> list[list[float]]:
         if not texts:

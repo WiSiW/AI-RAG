@@ -4,7 +4,11 @@ import type {
   ChatResponse,
   Chunk,
   ChunkEvaluationResultsPage,
+  ChunkEvaluationChunksPage,
   ChunkEvaluationRun,
+  ChunkSettingsReindexResponse,
+  ChunkTuningCaseResultsPage,
+  ChunkTuningRun,
   Conversation,
   ConversationDetail,
   DocumentContent,
@@ -23,6 +27,8 @@ import type {
   PublishedApi,
   PublishedApiCreated,
   ReparsePdfResponse,
+  RetrievalEvaluationCase,
+  RetrievalEvaluationDataset,
   SearchResponse,
   TokenResponse,
   UploadResponse,
@@ -218,6 +224,44 @@ export const api = {
   },
   getChunkEvaluation: (id: string) =>
     request<ChunkEvaluationRun>(`/chunk-evaluations/${id}`),
+  pauseChunkEvaluation: (id: string) =>
+    request<ChunkEvaluationRun>(`/chunk-evaluations/${id}/pause`, { method: "POST" }),
+  resumeChunkEvaluation: (id: string) =>
+    request<ChunkEvaluationRun>(`/chunk-evaluations/${id}/resume`, { method: "POST" }),
+  listChunkEvaluationChunks: (
+    id: string,
+    params: {
+      documentId?: string;
+      granularity?: string;
+      status?: string;
+      search?: string;
+      page?: number;
+      pageSize?: number;
+    } = {},
+  ) => {
+    const query = new URLSearchParams();
+    if (params.documentId) query.set("document_id", params.documentId);
+    if (params.granularity) query.set("granularity", params.granularity);
+    if (params.status) query.set("status", params.status);
+    if (params.search) query.set("search", params.search);
+    query.set("page", String(params.page ?? 1));
+    query.set("page_size", String(params.pageSize ?? 50));
+    return request<ChunkEvaluationChunksPage>(`/chunk-evaluations/${id}/chunks?${query.toString()}`);
+  },
+  selectChunkEvaluationChunks: (id: string, chunkIds: string[]) =>
+    request<ChunkEvaluationRun>(`/chunk-evaluations/${id}/chunks/select`, {
+      method: "POST",
+      body: JSON.stringify({ chunk_ids: chunkIds }),
+    }),
+  retryChunkEvaluationChunk: (id: string, itemId: string) =>
+    request<ChunkEvaluationRun>(`/chunk-evaluations/${id}/chunks/${itemId}/retry`, {
+      method: "POST",
+    }),
+  retryFailedChunkEvaluationChunks: (id: string, documentId?: string) =>
+    request<ChunkEvaluationRun>(`/chunk-evaluations/${id}/retry-failed`, {
+      method: "POST",
+      body: JSON.stringify({ document_id: documentId }),
+    }),
   listChunkEvaluationResults: (
     id: string,
     params: {
@@ -253,6 +297,113 @@ export const api = {
     ),
   deleteChunkEvaluation: (id: string) =>
     request<void>(`/chunk-evaluations/${id}`, { method: "DELETE" }),
+  listRetrievalEvaluationDatasets: (knowledgeBaseId?: string) => {
+    const query = new URLSearchParams();
+    if (knowledgeBaseId) query.set("knowledge_base_id", knowledgeBaseId);
+    return request<RetrievalEvaluationDataset[]>(
+      `/retrieval-evaluation-datasets${query.size ? `?${query.toString()}` : ""}`,
+    );
+  },
+  createRetrievalEvaluationDataset: (payload: Record<string, unknown>) =>
+    request<RetrievalEvaluationDataset>("/retrieval-evaluation-datasets", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateRetrievalEvaluationDataset: (id: string, payload: Record<string, unknown>) =>
+    request<RetrievalEvaluationDataset>(`/retrieval-evaluation-datasets/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteRetrievalEvaluationDataset: (id: string) =>
+    request<void>(`/retrieval-evaluation-datasets/${id}`, { method: "DELETE" }),
+  createRetrievalEvaluationCase: (datasetId: string, payload: Record<string, unknown>) =>
+    request<RetrievalEvaluationCase>(`/retrieval-evaluation-datasets/${datasetId}/cases`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateRetrievalEvaluationCase: (
+    datasetId: string,
+    caseId: string,
+    payload: Record<string, unknown>,
+  ) =>
+    request<RetrievalEvaluationCase>(
+      `/retrieval-evaluation-datasets/${datasetId}/cases/${caseId}`,
+      { method: "PATCH", body: JSON.stringify(payload) },
+    ),
+  deleteRetrievalEvaluationCase: (datasetId: string, caseId: string) =>
+    request<void>(`/retrieval-evaluation-datasets/${datasetId}/cases/${caseId}`, {
+      method: "DELETE",
+    }),
+  importRetrievalEvaluationCases: async (datasetId: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<RetrievalEvaluationDataset>(
+      `/retrieval-evaluation-datasets/${datasetId}/import`,
+      { method: "POST", body: form },
+    );
+  },
+  exportRetrievalEvaluationCases: async (datasetId: string): Promise<Blob> => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const response = await fetch(
+      `${API_BASE}/retrieval-evaluation-datasets/${datasetId}/export`,
+      { headers },
+    );
+    if (!response.ok) throw new ApiError("导出评测集失败", response.status);
+    return response.blob();
+  },
+  listChunkTuningRuns: (params: {
+    knowledgeBaseId?: string;
+    datasetId?: string;
+    stage?: string;
+  } = {}) => {
+    const query = new URLSearchParams();
+    if (params.knowledgeBaseId) query.set("knowledge_base_id", params.knowledgeBaseId);
+    if (params.datasetId) query.set("dataset_id", params.datasetId);
+    if (params.stage) query.set("stage", params.stage);
+    return request<ChunkTuningRun[]>(
+      `/chunk-tuning-runs${query.size ? `?${query.toString()}` : ""}`,
+    );
+  },
+  getChunkTuningRun: (id: string) => request<ChunkTuningRun>(`/chunk-tuning-runs/${id}`),
+  createChunkTuningRun: (payload: Record<string, unknown>) =>
+    request<ChunkTuningRun>("/chunk-tuning-runs", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  createChunkTuningVerification: (runId: string, trialIds: string[]) =>
+    request<ChunkTuningRun>(`/chunk-tuning-runs/${runId}/verifications`, {
+      method: "POST",
+      body: JSON.stringify({ trial_ids: trialIds }),
+    }),
+  cancelChunkTuningRun: (id: string) =>
+    request<ChunkTuningRun>(`/chunk-tuning-runs/${id}/cancel`, { method: "POST" }),
+  deleteChunkTuningRun: (id: string) =>
+    request<void>(`/chunk-tuning-runs/${id}`, { method: "DELETE" }),
+  listChunkTuningResults: (
+    runId: string,
+    params: { trialId?: string; questionType?: string; page?: number; pageSize?: number } = {},
+  ) => {
+    const query = new URLSearchParams();
+    if (params.trialId) query.set("trial_id", params.trialId);
+    if (params.questionType) query.set("question_type", params.questionType);
+    query.set("page", String(params.page ?? 1));
+    query.set("page_size", String(params.pageSize ?? 50));
+    return request<ChunkTuningCaseResultsPage>(
+      `/chunk-tuning-runs/${runId}/results?${query.toString()}`,
+    );
+  },
+  applyChunkTuningTrial: (runId: string, trialId: string) =>
+    request<KnowledgeBase>(`/chunk-tuning-runs/${runId}/apply`, {
+      method: "POST",
+      body: JSON.stringify({ trial_id: trialId }),
+    }),
+  reindexDocumentsWithChunkSettings: (kbId: string, payload: Record<string, unknown>) =>
+    request<ChunkSettingsReindexResponse>(`/knowledge-bases/${kbId}/chunk-settings/reindex`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   uploadDocument: async (
     kbId: string,
     file: File,

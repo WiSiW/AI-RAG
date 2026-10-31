@@ -6,7 +6,10 @@ import {
   CheckCircle2,
   ClipboardCheck,
   GitCompare,
+  ListPlus,
+  Pause,
   Play,
+  RotateCcw,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -25,9 +28,32 @@ const levelLabels: Record<string, string> = {
 const statusLabels: Record<string, string> = {
   queued: "排队中",
   running: "评估中",
+  pausing: "暂停中",
+  paused: "已暂停",
   partial: "部分完成",
   completed: "已完成",
   failed: "失败",
+};
+
+const stageLabels: Record<string, string> = {
+  queued: "排队",
+  rules_running: "规则检测",
+  llm_running: "LLM 评判",
+  aggregating: "汇总结果",
+  paused: "已暂停",
+  completed: "处理完成",
+  failed: "处理失败",
+};
+
+const chunkStatusLabels: Record<string, string> = {
+  not_selected: "未选择",
+  queued: "排队中",
+  rules_running: "规则处理中",
+  llm_queued: "等待 LLM",
+  llm_running: "LLM 处理中",
+  succeeded: "已成功",
+  failed: "已失败",
+  interrupted: "已中断",
 };
 
 export default function ChunkEvaluationPage() {
@@ -41,7 +67,13 @@ export default function ChunkEvaluationPage() {
   const [selectedLevels, setSelectedLevels] = useState<string[]>(["L1", "L2", "L3"]);
   const [llmEnabled, setLlmEnabled] = useState(true);
   const [judgeProfileId, setJudgeProfileId] = useState("");
+  const [initialChunkLimit, setInitialChunkLimit] = useState("200");
+  const [llmConcurrency, setLlmConcurrency] = useState("2");
   const [selectedRunId, setSelectedRunId] = useState("");
+  const [chunkStatusFilter, setChunkStatusFilter] = useState("");
+  const [chunkSearch, setChunkSearch] = useState("");
+  const [chunkPage, setChunkPage] = useState(1);
+  const [selectedChunkIds, setSelectedChunkIds] = useState<string[]>([]);
   const [granularityFilter, setGranularityFilter] = useState("");
   const [gradeFilter, setGradeFilter] = useState("");
   const [issueFilter, setIssueFilter] = useState("");
@@ -69,7 +101,7 @@ export default function ChunkEvaluationPage() {
     }),
     refetchInterval: (query) => {
       const runs = query.state.data ?? [];
-      return runs.some((run) => run.status === "queued" || run.status === "running") ? 2500 : false;
+      return runs.some((run) => ["queued", "running", "pausing"].includes(run.status)) ? 2500 : false;
     },
   });
   const runQuery = useQuery({
@@ -78,7 +110,7 @@ export default function ChunkEvaluationPage() {
     enabled: !!selectedRunId,
     refetchInterval: (query) => {
       const status = query.state.data?.status;
-      return status === "queued" || status === "running" ? 2000 : false;
+      return ["queued", "running", "pausing"].includes(status ?? "") ? 2000 : false;
     },
   });
   const resultsQuery = useQuery({
@@ -93,16 +125,33 @@ export default function ChunkEvaluationPage() {
     enabled: !!selectedRunId,
     refetchInterval: () => {
       const status = runQuery.data?.status;
-      return status === "queued" || status === "running" ? 2000 : false;
+      return ["queued", "running", "pausing"].includes(status ?? "") ? 2000 : false;
+    },
+  });
+  const chunksQuery = useQuery({
+    queryKey: ["chunk-evaluation-chunks", selectedRunId, chunkStatusFilter, chunkSearch, chunkPage],
+    queryFn: () => api.listChunkEvaluationChunks(selectedRunId, {
+      status: chunkStatusFilter || undefined,
+      search: chunkSearch || undefined,
+      page: chunkPage,
+      pageSize: 50,
+    }),
+    enabled: !!selectedRunId,
+    refetchInterval: () => {
+      const status = runQuery.data?.status;
+      return ["queued", "running", "pausing"].includes(status ?? "") ? 2000 : false;
     },
   });
 
   const knowledgeBases = kbQuery.data ?? [];
-  const models = (modelQuery.data ?? []).filter((model) => model.is_active && ["llm", "enrichment"].includes(model.kind));
+  const allModels = modelQuery.data ?? [];
+  const models = allModels.filter((model) => model.is_active && ["llm", "enrichment"].includes(model.kind));
   const documents = docsQuery.data ?? [];
   const runs = runsQuery.data ?? [];
   const run = runQuery.data;
   const results = resultsQuery.data?.items ?? [];
+  const chunks = chunksQuery.data?.items ?? [];
+  const chunkTotal = chunksQuery.data?.total ?? 0;
 
   useEffect(() => {
     if (!kbId && knowledgeBases[0]) setKbId(knowledgeBases[0].id);
@@ -117,6 +166,10 @@ export default function ChunkEvaluationPage() {
     setGradeFilter("");
     setIssueFilter("");
     setReviewSampleOnly(false);
+    setChunkStatusFilter("");
+    setChunkSearch("");
+    setChunkPage(1);
+    setSelectedChunkIds([]);
   }, [selectedRunId]);
 
   useEffect(() => {
@@ -136,6 +189,8 @@ export default function ChunkEvaluationPage() {
       granularities: selectedLevels,
       judge_profile_id: llmEnabled ? judgeProfileId || undefined : undefined,
       llm_enabled: llmEnabled,
+      initial_chunk_limit: Number(initialChunkLimit),
+      llm_concurrency: Number(llmConcurrency),
     }),
     onSuccess: async (created) => {
       setSelectedRunId(created.id);
@@ -148,6 +203,42 @@ export default function ChunkEvaluationPage() {
     onSuccess: async (_, deletedId) => {
       if (selectedRunId === deletedId) setSelectedRunId("");
       await queryClient.invalidateQueries({ queryKey: ["chunk-evaluations"] });
+    },
+  });
+
+  const refreshRun = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["chunk-evaluations"] }),
+      queryClient.invalidateQueries({ queryKey: ["chunk-evaluation", selectedRunId] }),
+      queryClient.invalidateQueries({ queryKey: ["chunk-evaluation-chunks", selectedRunId] }),
+      queryClient.invalidateQueries({ queryKey: ["chunk-evaluation-results", selectedRunId] }),
+    ]);
+  };
+
+  const pauseMutation = useMutation({
+    mutationFn: api.pauseChunkEvaluation,
+    onSuccess: refreshRun,
+  });
+  const resumeMutation = useMutation({
+    mutationFn: api.resumeChunkEvaluation,
+    onSuccess: refreshRun,
+  });
+  const retryItemMutation = useMutation({
+    mutationFn: (itemId: string) => api.retryChunkEvaluationChunk(selectedRunId, itemId),
+    onSuccess: refreshRun,
+  });
+  const retryFailedMutation = useMutation({
+    mutationFn: () => api.retryFailedChunkEvaluationChunks(
+      selectedRunId,
+      scope === "document" && documentId ? documentId : undefined,
+    ),
+    onSuccess: refreshRun,
+  });
+  const selectChunksMutation = useMutation({
+    mutationFn: () => api.selectChunkEvaluationChunks(selectedRunId, selectedChunkIds),
+    onSuccess: async () => {
+      setSelectedChunkIds([]);
+      await refreshRun();
     },
   });
 
@@ -181,6 +272,18 @@ export default function ChunkEvaluationPage() {
     setSelectedLevels((current) => current.includes(level) ? current.filter((item) => item !== level) : [...current, level]);
   }
 
+  function toggleChunk(chunkId: string) {
+    setSelectedChunkIds((current) => current.includes(chunkId)
+      ? current.filter((item) => item !== chunkId)
+      : [...current, chunkId]);
+  }
+
+  function toggleCurrentChunks() {
+    const selectable = chunks.filter((item) => item.status === "not_selected").map((item) => item.chunk_id);
+    const allSelected = selectable.length > 0 && selectable.every((item) => selectedChunkIds.includes(item));
+    setSelectedChunkIds(allSelected ? [] : selectable);
+  }
+
   function openReview(item: ChunkEvaluationResult) {
     setReviewResult(item);
     setHumanScore(String(item.human_score ?? 5));
@@ -199,7 +302,7 @@ export default function ChunkEvaluationPage() {
       />
 
       <div className="grid gap-5 xl:grid-cols-[380px_minmax(0,1fr)]">
-        <section className="panel h-fit p-5">
+        <section className="thin-scrollbar panel h-fit p-5 xl:sticky xl:top-24 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto">
           <div className="font-semibold text-slate-900">创建评估</div>
           <div className="mt-4 space-y-4">
             <div>
@@ -248,7 +351,21 @@ export default function ChunkEvaluationPage() {
                 </select>
               </div>
             )}
-            {(createMutation.error || deleteMutation.error) && <ErrorState message={(createMutation.error ?? deleteMutation.error)!.message} />}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="label">首轮 Chunk 上限</label>
+                <input className="input" type="number" min={100} max={200} value={initialChunkLimit} onChange={(event) => setInitialChunkLimit(event.target.value)} />
+                <div className="mt-1 text-[11px] text-slate-400">每篇文档自动抽样 100–200 个</div>
+              </div>
+              <div>
+                <label className="label">LLM 并发数</label>
+                <input className="input" type="number" min={1} max={4} value={llmConcurrency} onChange={(event) => setLlmConcurrency(event.target.value)} />
+                <div className="mt-1 text-[11px] text-slate-400">建议单服务使用 2</div>
+              </div>
+            </div>
+            {(createMutation.error || deleteMutation.error || pauseMutation.error || resumeMutation.error || retryItemMutation.error || retryFailedMutation.error || selectChunksMutation.error) && (
+              <ErrorState message={(createMutation.error ?? deleteMutation.error ?? pauseMutation.error ?? resumeMutation.error ?? retryItemMutation.error ?? retryFailedMutation.error ?? selectChunksMutation.error)!.message} />
+            )}
             <button
               type="button"
               onClick={() => createMutation.mutate()}
@@ -279,7 +396,7 @@ export default function ChunkEvaluationPage() {
                     </div>
                     <div className="flex items-center gap-4">
                       <div className="text-right"><div className="text-xs text-slate-400">综合分</div><div className="font-mono text-lg font-semibold text-slate-800">{score(item.aggregate.overall_score)}</div></div>
-                      <Trash2 className="h-4 w-4 text-slate-300" onClick={(event) => { event.stopPropagation(); if (window.confirm("确认删除该评估记录？")) deleteMutation.mutate(item.id); }} />
+                      <Trash2 className={`h-4 w-4 ${item.can_delete ? "text-slate-400" : "text-slate-200"}`} onClick={(event) => { event.stopPropagation(); if (item.can_delete && window.confirm("确认删除该评估记录？")) deleteMutation.mutate(item.id); }} />
                     </div>
                   </button>
                 ))}
@@ -287,7 +404,92 @@ export default function ChunkEvaluationPage() {
             )}
           </div>
 
-          {run && <RunSummary run={run} levelScores={levelScores} issueCounts={issueCounts} calibration={calibration} />}
+          {run && (
+            <RunSummary
+              run={run}
+              levelScores={levelScores}
+              issueCounts={issueCounts}
+              calibration={calibration}
+              knowledgeBaseName={
+                snapshotText(run.config_snapshot.knowledge_base_name)
+                || knowledgeBases.find((item) => item.id === run.knowledge_base_id)?.name
+                || "未知知识库"
+              }
+              documentName={
+                snapshotText(run.config_snapshot.document_name)
+                || documents.find((item) => item.id === run.document_id)?.filename
+                || "未知文档"
+              }
+              evaluationModelName={evaluationModelLabel(
+                run,
+                allModels,
+                knowledgeBases.find((item) => item.id === run.knowledge_base_id),
+              )}
+            />
+          )}
+          {run && (
+            <RunControls
+              run={run}
+              pausing={pauseMutation.isPending}
+              resuming={resumeMutation.isPending}
+              retrying={retryFailedMutation.isPending}
+              deleting={deleteMutation.isPending}
+              onPause={() => pauseMutation.mutate(run.id)}
+              onResume={() => resumeMutation.mutate(run.id)}
+              onRetryFailed={() => retryFailedMutation.mutate()}
+              onDelete={() => {
+                if (window.confirm("确认删除该评估任务及其结果？")) deleteMutation.mutate(run.id);
+              }}
+            />
+          )}
+
+          {run && (
+            <div className="panel overflow-hidden">
+              <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <div className="font-semibold text-slate-900">Chunk 处理队列</div>
+                  <div className="mt-1 text-xs text-slate-500">未选择 {run.chunks_not_selected} 个 · 中断 {run.chunks_interrupted} 个</div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <input className="input w-auto" value={chunkSearch} onChange={(event) => { setChunkSearch(event.target.value); setChunkPage(1); }} placeholder="搜索内容或章节" />
+                  <select className="input w-auto" value={chunkStatusFilter} onChange={(event) => { setChunkStatusFilter(event.target.value); setChunkPage(1); }}>
+                    <option value="">全部状态</option>
+                    <option value="not_selected">未选择</option>
+                    <option value="queued">排队中</option>
+                    <option value="rules_running">规则处理中</option>
+                    <option value="llm_queued">等待 LLM</option>
+                    <option value="llm_running">LLM 处理中</option>
+                    <option value="succeeded">已成功</option>
+                    <option value="failed">已失败</option>
+                    <option value="interrupted">已中断</option>
+                  </select>
+                  <button type="button" className="btn-secondary" disabled={!selectedChunkIds.length || selectChunksMutation.isPending || !run.can_delete} onClick={() => selectChunksMutation.mutate()}>
+                    <ListPlus className="h-4 w-4" />加入评估（{selectedChunkIds.length}）
+                  </button>
+                </div>
+              </div>
+              {chunksQuery.error ? <ErrorState message={chunksQuery.error.message} /> : chunksQuery.isLoading ? <LoadingState /> : !chunks.length ? <EmptyState title="没有匹配 chunk" description="调整状态、粒度或搜索条件。" /> : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-slate-50 text-left text-xs text-slate-500"><tr><th className="px-4 py-3"><input type="checkbox" checked={chunks.filter((item) => item.status === "not_selected").length > 0 && chunks.filter((item) => item.status === "not_selected").every((item) => selectedChunkIds.includes(item.chunk_id))} onChange={toggleCurrentChunks} /></th><th className="px-4 py-3">粒度</th><th className="px-4 py-3">章节 / 内容</th><th className="px-4 py-3">状态</th><th className="px-4 py-3">尝试 / 错误</th><th className="px-4 py-3">操作</th></tr></thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {chunks.map((item) => (
+                        <tr key={`${item.run_id}:${item.chunk_id}`} className="align-top hover:bg-slate-50">
+                          <td className="px-4 py-3"><input type="checkbox" disabled={item.status !== "not_selected"} checked={item.status === "not_selected" && selectedChunkIds.includes(item.chunk_id)} onChange={() => toggleChunk(item.chunk_id)} /></td>
+                          <td className="px-4 py-3"><div className="font-semibold text-slate-800">{item.granularity_level}</div><div className="text-[11px] text-slate-400">#{item.chunk_index}</div></td>
+                          <td className="max-w-xl px-4 py-3"><div className="truncate text-xs text-brand-700">{item.section_path}</div><div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-600">{item.content_snapshot}</div></td>
+                          <td className="px-4 py-3"><ChunkStatusChip status={item.status} fallback={item.fallback_applied} /></td>
+                          <td className="max-w-xs px-4 py-3 text-xs text-slate-500"><div>{item.attempt_count} 次</div>{item.error && <div className="mt-1 line-clamp-2 text-red-600">{item.error}</div>}</td>
+                          <td className="px-4 py-3">{item.id && ["failed", "interrupted"].includes(item.status) && <button type="button" className="btn-secondary px-2 py-1 text-xs" disabled={retryItemMutation.isPending || !run.can_delete} onClick={() => retryItemMutation.mutate(item.id!)}><RotateCcw className="h-3 w-3" />重试</button>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div className="flex items-center justify-between border-t border-slate-100 px-5 py-3 text-xs text-slate-500"><span>共 {chunkTotal} 个 chunk</span><div className="flex items-center gap-2"><button type="button" className="btn-secondary px-2 py-1" disabled={chunkPage <= 1} onClick={() => setChunkPage((page) => Math.max(1, page - 1))}>上一页</button><span>第 {chunkPage} 页</span><button type="button" className="btn-secondary px-2 py-1" disabled={chunkPage * 50 >= chunkTotal} onClick={() => setChunkPage((page) => page + 1)}>下一页</button></div></div>
+            </div>
+          )}
 
           {run && (
             <div className="panel overflow-hidden">
@@ -366,24 +568,106 @@ export default function ChunkEvaluationPage() {
   );
 }
 
-function RunSummary({ run, levelScores, issueCounts, calibration }: { run: ChunkEvaluationRun; levelScores: Record<string, number>; issueCounts: Record<string, number>; calibration: Record<string, number | null> }) {
+function RunControls({
+  run,
+  pausing,
+  resuming,
+  retrying,
+  deleting,
+  onPause,
+  onResume,
+  onRetryFailed,
+  onDelete,
+}: {
+  run: ChunkEvaluationRun;
+  pausing: boolean;
+  resuming: boolean;
+  retrying: boolean;
+  deleting: boolean;
+  onPause: () => void;
+  onResume: () => void;
+  onRetryFailed: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="panel flex flex-wrap items-center justify-between gap-3 p-4">
+      <div className="text-xs text-slate-500">当前阶段：<span className="font-medium text-slate-800">{stageLabels[run.stage] ?? run.stage}</span> · 成功 {run.chunks_succeeded} · 失败 {run.chunks_failed} · 待处理 {run.chunks_pending}</div>
+      <div className="flex flex-wrap gap-2">
+        {run.can_pause && <button type="button" className="btn-secondary" disabled={pausing} onClick={onPause}><Pause className="h-4 w-4" />{pausing ? "暂停中..." : "暂停"}</button>}
+        {run.can_resume && <button type="button" className="btn-primary" disabled={resuming} onClick={onResume}><Play className="h-4 w-4" />{resuming ? "启动中..." : "继续"}</button>}
+        {["paused", "partial", "completed", "failed"].includes(run.status) && run.chunks_failed > 0 && <button type="button" className="btn-secondary" disabled={retrying} onClick={onRetryFailed}><RotateCcw className="h-4 w-4" />重试全部失败</button>}
+        {run.can_delete && <button type="button" className="btn-secondary text-red-600" disabled={deleting} onClick={onDelete}><Trash2 className="h-4 w-4" />删除任务</button>}
+      </div>
+    </div>
+  );
+}
+
+function RunSummary({
+  run,
+  levelScores,
+  issueCounts,
+  calibration,
+  knowledgeBaseName,
+  documentName,
+  evaluationModelName,
+}: {
+  run: ChunkEvaluationRun;
+  levelScores: Record<string, number>;
+  issueCounts: Record<string, number>;
+  calibration: Record<string, number | null>;
+  knowledgeBaseName: string;
+  documentName: string;
+  evaluationModelName: string;
+}) {
   const aggregate = run.aggregate;
   const progress = run.progress ?? {};
-  const gradeCounts = (aggregate.grade_counts as Record<string, number> | undefined) ?? {};
+  const gradeCounts = (aggregate.grade_counts as Record<string, number | undefined>) ?? {};
+  const batchTotal = run.batch_total || 0;
+  const totalDocuments = Number(progress.total_documents ?? 0);
+  const progressValue = run.stage === "rules_running"
+    ? (run.chunks_total ? Math.round((Number(progress.rules_completed ?? 0) / run.chunks_total) * 100) : 0)
+    : batchTotal ? Math.round((run.batch_completed / batchTotal) * 100) : 0;
   return (
     <div className="panel p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="font-semibold text-slate-900">运行摘要</div><div className="mt-1 text-xs text-slate-500">{statusLabels[run.status] ?? run.status} · 处理 {String(progress.processed_documents ?? 0)}/{String(progress.total_documents ?? 0)} 文档 · {String(progress.evaluated_chunks ?? aggregate.result_count ?? 0)} 个 chunk</div></div><StatusChip status={run.status} /></div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="font-semibold text-slate-900">运行摘要</div><div className="mt-1 text-xs text-slate-500">{statusLabels[run.status] ?? run.status} · {stageLabels[run.stage] ?? run.stage} · 处理 {String(progress.processed_documents ?? 0)}/{String(progress.total_documents ?? 0)} 文档</div></div><StatusChip status={run.status} /></div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <RunFact label="评估范围" value={run.scope_type === "document" ? "文档级" : "知识库级"} detail={`粒度 ${run.granularities.join(" / ") || "-"}`} />
+        <RunFact label="知识库" value={knowledgeBaseName} />
+        <RunFact
+          label="文档"
+          value={run.scope_type === "document" ? documentName : "全部文档"}
+          detail={run.scope_type === "document" ? undefined : totalDocuments > 0 ? `覆盖 ${totalDocuments} 篇文档` : "覆盖知识库内全部就绪文档"}
+        />
+        <RunFact label="评估模型" value={evaluationModelName} detail={run.llm_enabled ? "LLM 语义评判" : "仅规则检测"} />
+      </div>
+      <div className="mt-4 rounded-xl bg-slate-50 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium text-slate-700">当前批次 {run.stage === "rules_running" ? `${Number(progress.rules_completed ?? 0)} / ${run.chunks_total}` : `${run.batch_completed + run.batch_running} / ${run.batch_total}`}</span><span className="text-slate-500">成功 {run.chunks_succeeded} · 失败 {run.chunks_failed} · 待处理 {run.chunks_pending} · 中断 {run.chunks_interrupted}</span></div>
+        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-brand-500 transition-all" style={{ width: `${Math.min(100, progressValue)}%` }} /></div>
+      </div>
       <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
         <Metric label="综合分" value={score(aggregate.overall_score)} />
         {levels.map((level) => <Metric key={level} label={levelLabels[level]} value={score(levelScores[level])} />)}
         <Metric label="人工校准 MAE" value={calibration.mae == null ? "-" : String(calibration.mae)} />
         <Metric label="人工相关性" value={calibration.correlation == null ? "-" : String(calibration.correlation)} />
       </div>
-      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>通过 {gradeCounts.pass ?? 0}</span><span>警告 {gradeCounts.warn ?? 0}</span><span>失败 {gradeCounts.fail ?? 0}</span><span>人工样本 {String(aggregate.review_sample_count ?? 0)} 个</span><span>已复核 {String(aggregate.reviewed_count ?? 0)} 个</span></div>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>通过 {gradeCounts.pass ?? 0}</span><span>警告 {gradeCounts.warn ?? 0}</span><span>失败 {gradeCounts.fail ?? 0}</span><span>人工样本 {String(aggregate.review_sample_count ?? 0)} 个</span><span>已复核 {String(aggregate.reviewed_count ?? 0)} 个</span><span>未选择 {run.chunks_not_selected} 个</span></div>
       {!!Object.keys(issueCounts).length && <div className="mt-3 flex flex-wrap gap-1">{Object.entries(issueCounts).slice(0, 12).map(([issue, count]) => <span key={issue} className="chip bg-amber-50 text-[11px] text-amber-700">{issue} · {count}</span>)}</div>}
       {run.errors.length > 0 && <div className="mt-3 rounded-xl bg-red-50 p-3 text-xs text-red-700">{run.errors.map((error) => String(error.error ?? JSON.stringify(error))).join("；")}</div>}
     </div>
   );
+}
+
+function ChunkStatusChip({ status, fallback }: { status: string; fallback: boolean }) {
+  const className = status === "succeeded"
+    ? "bg-emerald-50 text-emerald-700"
+    : status === "failed"
+      ? "bg-red-50 text-red-700"
+      : status === "interrupted"
+        ? "bg-amber-50 text-amber-700"
+        : status === "not_selected"
+          ? "bg-slate-100 text-slate-500"
+          : "bg-sky-50 text-sky-700";
+  return <span className={`chip text-[11px] ${className}`}>{chunkStatusLabels[status] ?? status}{fallback ? " · 规则降级" : ""}</span>;
 }
 
 function ComparisonView({ data }: { data: Record<string, unknown> }) {
@@ -395,6 +679,41 @@ function ComparisonView({ data }: { data: Record<string, unknown> }) {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-xl bg-slate-50 p-3"><div className="text-xs text-slate-400">{label}</div><div className="mt-1 font-mono text-lg font-semibold text-slate-800">{value}</div></div>;
+}
+
+function RunFact({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return (
+    <div className="rounded-xl border border-slate-200 p-3">
+      <div className="text-xs text-slate-400">{label}</div>
+      <div className="mt-1 break-words text-sm font-medium text-slate-800">{value}</div>
+      {detail && <div className="mt-1 text-[11px] text-slate-400">{detail}</div>}
+    </div>
+  );
+}
+
+function snapshotText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function evaluationModelLabel(
+  run: ChunkEvaluationRun,
+  models: Array<{ id: string; name: string; model_name: string }>,
+  knowledgeBase?: { enrichment_profile_id: string | null; default_llm_profile_id: string | null },
+): string {
+  if (!run.llm_enabled) return "仅规则评估";
+  const snapshotName = snapshotText(run.config_snapshot.judge_profile_name);
+  if (snapshotName) {
+    const snapshotModel = snapshotText(run.config_snapshot.judge_model_name);
+    return snapshotModel && snapshotModel !== snapshotName ? `${snapshotName} · ${snapshotModel}` : snapshotName;
+  }
+  const profileId = run.judge_profile_id
+    ?? knowledgeBase?.enrichment_profile_id
+    ?? knowledgeBase?.default_llm_profile_id;
+  const profile = models.find((model) => model.id === profileId);
+  if (profile) {
+    return profile.model_name && profile.model_name !== profile.name ? `${profile.name} · ${profile.model_name}` : profile.name;
+  }
+  return run.judge_profile_id ? "模型已删除" : "未配置可用模型（规则降级）";
 }
 
 function ContextBlock({ label, value }: { label: string; value: string }) {

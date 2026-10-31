@@ -31,6 +31,7 @@ from app.db.models import (
     IngestionJob,
     JobStatus,
     KnowledgeBase,
+    RetrievalEvaluationEvidence,
 )
 from app.db.session import get_db
 from app.indexing.bm25_store import BM25Store
@@ -777,6 +778,13 @@ def delete_document(
     _ensure_kb_writable(db, document.kb_id)
     if document.status in {DocumentStatus.PENDING, DocumentStatus.PROCESSING}:
         raise ConflictError("文档正在处理中，暂时无法删除")
+    evidence_count = db.scalar(
+        select(func.count())
+        .select_from(RetrievalEvaluationEvidence)
+        .where(RetrievalEvaluationEvidence.document_id == document.id)
+    )
+    if evidence_count:
+        raise ConflictError("文档正被检索评测集引用，无法删除")
     vector_store.delete_document(document.kb_id, document.id, index_version="v1")
     vector_store.delete_document(document.kb_id, document.id, index_version="v2")
     bm25_store.delete_document(document.kb_id, document.id, index_version="v1")

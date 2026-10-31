@@ -13,6 +13,8 @@ interface ModelForm {
   modelName: string;
   apiKey: string;
   dimensions: string;
+  timeoutMinutes: string;
+  maxRetries: string;
   config: string;
   isActive: boolean;
 }
@@ -25,6 +27,8 @@ const initialForm: ModelForm = {
   modelName: "",
   apiKey: "",
   dimensions: "",
+  timeoutMinutes: "20",
+  maxRetries: "2",
   config: "{}",
   isActive: true,
 };
@@ -69,6 +73,10 @@ export default function ModelsPage() {
         config,
         is_active: form.isActive,
       };
+      if (["llm", "enrichment"].includes(form.kind)) {
+        payload.request_timeout_seconds = Math.round(Number(form.timeoutMinutes) * 60);
+        payload.request_max_retries = Number(form.maxRetries);
+      }
       if (form.apiKey) payload.api_key = form.apiKey;
       if (editingId) return api.updateModel(editingId, payload);
       return api.createModel({ ...payload, kind: form.kind, api_key: form.apiKey || undefined });
@@ -113,6 +121,8 @@ export default function ModelsPage() {
       modelName: model.model_name,
       apiKey: "",
       dimensions: model.dimensions ? String(model.dimensions) : "",
+      timeoutMinutes: String(Math.round((model.request_timeout_seconds ?? 1200) / 60)),
+      maxRetries: String(model.request_max_retries ?? 2),
       config: JSON.stringify(model.config ?? {}, null, 2),
       isActive: model.is_active,
     });
@@ -202,6 +212,12 @@ export default function ModelsPage() {
             <div><label className="label">API Key</label><input className="input" type="password" value={form.apiKey} onChange={(event) => setForm({ ...form, apiKey: event.target.value })} placeholder={editingId ? "留空保留现有密钥" : "留空则使用 EMPTY"} /></div>
             <div><label className="label">Provider</label><input className="input" value={form.provider} onChange={(event) => setForm({ ...form, provider: event.target.value })} /></div>
           </div>
+          {["llm", "enrichment"].includes(form.kind) && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div><label className="label">请求超时（分钟）</label><input className="input" type="number" min={1} max={120} value={form.timeoutMinutes} onChange={(event) => setForm({ ...form, timeoutMinutes: event.target.value })} /><div className="mt-1 text-xs text-slate-400">默认 20 分钟</div></div>
+              <div><label className="label">重试次数</label><input className="input" type="number" min={0} max={5} value={form.maxRetries} onChange={(event) => setForm({ ...form, maxRetries: event.target.value })} /><div className="mt-1 text-xs text-slate-400">默认 2 次，最多共 3 次请求</div></div>
+            </div>
+          )}
           <div className="grid gap-4 sm:grid-cols-2">
             {form.kind === "embedding" && (
               <div><label className="label">向量维度</label><input className="input" type="number" min={1} value={form.dimensions} onChange={(event) => setForm({ ...form, dimensions: event.target.value })} placeholder="例如 1024" required /></div>
@@ -255,6 +271,7 @@ function ModelCard({
       <div className="mt-4 space-y-2 rounded-xl bg-slate-50 p-3 text-xs">
         <div className="flex justify-between gap-3"><span className="text-slate-400">Base URL</span><span className="truncate text-right text-slate-600">{model.base_url}</span></div>
         {model.dimensions && <div className="flex justify-between"><span className="text-slate-400">维度</span><span className="text-slate-600">{model.dimensions}</span></div>}
+        {["llm", "enrichment"].includes(model.kind) && <div className="flex justify-between"><span className="text-slate-400">超时 / 重试</span><span className="text-slate-600">{Math.round(model.request_timeout_seconds / 60)} 分钟 / {model.request_max_retries} 次</span></div>}
         <div className="flex justify-between"><span className="text-slate-400">API Key</span><span className="text-slate-600">{model.has_api_key ? "已保存" : "EMPTY"}</span></div>
       </div>
       {testResult && (

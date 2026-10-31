@@ -15,6 +15,10 @@ ChunkModeValue = Literal[
 ]
 PublicationKindValue = Literal["qa", "search"]
 EvaluationGranularityValue = Literal["L1", "L2", "L3"]
+EvaluationQuestionType = Literal[
+    "detail", "comparison", "summary", "reasoning", "table", "code", "no_answer"
+]
+ChunkTuningStageValue = Literal["screening", "verification"]
 KnowledgeBaseExportMode = Literal["documents", "full"]
 KnowledgeBaseIndexPolicy = Literal["strict", "rebuild"]
 RetrievalModeValue = Literal["auto", "single", "multi"]
@@ -58,6 +62,8 @@ class ModelProfileCreate(BaseModel):
     model_name: str = Field(min_length=1, max_length=200)
     api_key: str | None = None
     dimensions: int | None = Field(default=None, ge=1, le=65536)
+    request_timeout_seconds: int = Field(default=1200, ge=60, le=7200)
+    request_max_retries: int = Field(default=2, ge=0, le=5)
     config: dict[str, Any] = Field(default_factory=dict)
     is_active: bool = True
 
@@ -70,6 +76,8 @@ class ModelProfileUpdate(BaseModel):
     api_key: str | None = None
     clear_api_key: bool = False
     dimensions: int | None = Field(default=None, ge=1, le=65536)
+    request_timeout_seconds: int | None = Field(default=None, ge=60, le=7200)
+    request_max_retries: int | None = Field(default=None, ge=0, le=5)
     config: dict[str, Any] | None = None
     is_active: bool | None = None
 
@@ -82,6 +90,8 @@ class ModelProfileRead(ORMModel):
     base_url: str
     model_name: str
     dimensions: int | None
+    request_timeout_seconds: int
+    request_max_retries: int
     config: dict[str, Any]
     is_active: bool
     has_api_key: bool = False
@@ -282,6 +292,8 @@ class ChunkEvaluationCreate(BaseModel):
     )
     judge_profile_id: str | None = None
     llm_enabled: bool = True
+    initial_chunk_limit: int = Field(default=200, ge=100, le=200)
+    llm_concurrency: int = Field(default=2, ge=1, le=4)
 
     @model_validator(mode="after")
     def validate_scope(self) -> "ChunkEvaluationCreate":
@@ -300,6 +312,23 @@ class ChunkEvaluationRunRead(ORMModel):
     judge_profile_id: str | None
     llm_enabled: bool
     status: str
+    stage: str
+    celery_task_id: str | None
+    pause_requested_at: datetime | None
+    paused_at: datetime | None
+    heartbeat_at: datetime | None
+    batch_total: int
+    batch_completed: int
+    batch_running: int
+    chunks_total: int
+    chunks_succeeded: int
+    chunks_failed: int
+    chunks_pending: int
+    chunks_interrupted: int
+    chunks_not_selected: int
+    can_pause: bool
+    can_resume: bool
+    can_delete: bool
     progress: dict[str, Any]
     config_snapshot: dict[str, Any]
     aggregate: dict[str, Any]
@@ -346,10 +375,240 @@ class ChunkEvaluationResultsPage(BaseModel):
     page_size: int
 
 
+class ChunkEvaluationChunkRead(BaseModel):
+    id: str | None
+    run_id: str
+    document_id: str
+    chunk_id: str
+    chunk_index: int
+    granularity_level: str
+    section_path: str
+    content_snapshot: str
+    status: str
+    selection_source: str
+    queue_position: int | None = None
+    attempt_count: int = 0
+    rule_succeeded: bool = False
+    llm_succeeded: bool = False
+    fallback_applied: bool = False
+    error: str | None = None
+    result_id: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ChunkEvaluationChunksPage(BaseModel):
+    items: list[ChunkEvaluationChunkRead]
+    total: int
+    page: int
+    page_size: int
+
+
+class ChunkEvaluationChunkSelect(BaseModel):
+    chunk_ids: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("chunk_ids")
+    @classmethod
+    def deduplicate_chunk_ids(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(item.strip() for item in value if item.strip()))
+
+
+class ChunkEvaluationRetryFailed(BaseModel):
+    document_id: str | None = None
+
+
 class ChunkEvaluationReviewUpdate(BaseModel):
     human_score: int = Field(ge=1, le=5)
     human_issue_codes: list[str] = Field(default_factory=list)
     human_comment: str = Field(default="", max_length=4000)
+
+
+class RetrievalEvaluationEvidenceInput(BaseModel):
+    document_id: str
+    quote: str = Field(min_length=1, max_length=4000)
+    section_path: str = Field(default="正文", max_length=1000)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
+
+
+class RetrievalEvaluationCaseCreate(BaseModel):
+    question: str = Field(min_length=1, max_length=20000)
+    reference_answer: str = Field(default="", max_length=20000)
+    question_type: EvaluationQuestionType = "detail"
+    evidence: list[RetrievalEvaluationEvidenceInput] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_answerability(self) -> "RetrievalEvaluationCaseCreate":
+        self.question = self.question.strip()
+        self.reference_answer = self.reference_answer.strip()
+        if self.question_type != "no_answer":
+            if not self.reference_answer:
+                raise ValueError("可回答问题必须提供标准答案")
+            if not self.evidence:
+                raise ValueError("可回答问题至少需要一条黄金证据")
+        elif self.evidence:
+            raise ValueError("无答案问题不能添加黄金证据")
+        return self
+
+
+class RetrievalEvaluationEvidenceRead(ORMModel):
+    id: str
+    case_id: str
+    document_id: str
+    quote: str
+    normalized_quote: str
+    char_start: int | None
+    char_end: int | None
+    section_path: str
+    page_start: int | None
+    page_end: int | None
+    created_at: datetime
+
+
+class RetrievalEvaluationCaseRead(ORMModel):
+    id: str
+    dataset_id: str
+    question: str
+    normalized_question: str
+    reference_answer: str
+    question_type: str
+    answerable: bool
+    sort_order: int
+    evidence: list[RetrievalEvaluationEvidenceRead] = Field(default_factory=list)
+    created_at: datetime
+
+
+class RetrievalEvaluationDatasetCreate(BaseModel):
+    knowledge_base_id: str
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=4000)
+    document_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class RetrievalEvaluationDatasetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=4000)
+    document_ids: list[str] | None = Field(default=None, min_length=1, max_length=200)
+
+
+class RetrievalEvaluationDatasetRead(ORMModel):
+    id: str
+    kb_id: str
+    name: str
+    description: str
+    document_ids: list[str]
+    version: int
+    cases: list[RetrievalEvaluationCaseRead] = Field(default_factory=list)
+    case_count: int = 0
+    answerable_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChunkTuningRunCreate(BaseModel):
+    knowledge_base_id: str
+    dataset_id: str
+    chunk_sizes: list[int] = Field(
+        default_factory=lambda: [256, 512, 1024, 1536], min_length=1, max_length=10
+    )
+    overlap_ratios: list[float] = Field(
+        default_factory=lambda: [0, 10, 20, 25], min_length=1, max_length=10
+    )
+
+
+class ChunkTuningVerificationCreate(BaseModel):
+    trial_ids: list[str] = Field(min_length=1, max_length=5)
+
+
+class ChunkTuningApplyRequest(BaseModel):
+    trial_id: str
+
+
+class ChunkTuningTrialRead(ORMModel):
+    id: str
+    run_id: str
+    label: str
+    index_namespace: str
+    chunk_mode: str
+    chunk_size: int
+    chunk_overlap: int
+    overlap_ratio: float
+    is_baseline: bool
+    status: str
+    metrics: dict[str, Any]
+    cost: dict[str, Any]
+    errors: list[Any]
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class ChunkTuningRunRead(ORMModel):
+    id: str
+    parent_run_id: str | None
+    kb_id: str
+    dataset_id: str
+    dataset_version: int
+    stage: str
+    status: str
+    config_snapshot: dict[str, Any]
+    dataset_snapshot: dict[str, Any]
+    progress: dict[str, Any]
+    aggregate: dict[str, Any]
+    errors: list[Any]
+    trials: list[ChunkTuningTrialRead] = Field(default_factory=list)
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class ChunkTuningCaseResultRead(ORMModel):
+    id: str
+    trial_id: str
+    case_id: str
+    question: str
+    question_type: str
+    answerable: bool
+    reference_answer: str
+    recall_at_5: float
+    recall_at_10: float
+    all_evidence_hit_at_5: bool
+    all_evidence_hit_at_10: bool
+    reciprocal_rank: float
+    evidence_density: float
+    latency_ms: float
+    evidence_results: list[Any]
+    retrieved_hits: list[Any]
+    answer: str
+    quality_scores: dict[str, Any]
+    errors: list[Any]
+    created_at: datetime
+
+
+class ChunkTuningCaseResultsPage(BaseModel):
+    items: list[ChunkTuningCaseResultRead]
+    total: int
+    page: int
+    page_size: int
+
+
+class ChunkSettingsReindexRequest(BaseModel):
+    document_ids: list[str] = Field(min_length=1, max_length=500)
+    chunk_mode: ChunkModeValue
+    chunk_size: int = Field(ge=32, le=8192)
+    chunk_overlap: int = Field(ge=0, le=8191)
+
+    @model_validator(mode="after")
+    def validate_overlap(self) -> "ChunkSettingsReindexRequest":
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap 必须小于 chunk_size")
+        return self
+
+
+class ChunkSettingsReindexResponse(BaseModel):
+    queued: int = 0
+    skipped: int = 0
+    job_ids: list[str] = Field(default_factory=list)
 
 
 class KnowledgeBaseExportRequest(BaseModel):
