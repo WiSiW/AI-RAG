@@ -8,6 +8,7 @@ import {
   Search,
   LogOut,
   Plus,
+  ScanText,
   Settings2,
   UploadCloud,
 } from "lucide-react";
@@ -20,6 +21,7 @@ const navItems = [
   { to: "/chat", label: "智能问答", icon: Bot },
   { to: "/history", label: "历史问答", icon: History },
   { to: "/models", label: "模型配置", icon: Settings2 },
+  { to: "/parsing-engines", label: "解析引擎", icon: ScanText },
   { to: "/search-quality", label: "检索质检", icon: Search },
   { to: "/chunk-evaluations", label: "分块评估", icon: ClipboardCheck },
   { to: "/api-publishing", label: "API 发布", icon: Code2 },
@@ -31,6 +33,7 @@ const pageTitles: Record<string, string> = {
   "/chat": "智能问答",
   "/history": "历史问答",
   "/models": "模型配置",
+  "/parsing-engines": "解析引擎",
   "/search-quality": "检索质检",
   "/chunk-evaluations": "分块评估",
   "/api-publishing": "API 发布",

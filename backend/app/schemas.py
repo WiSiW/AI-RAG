@@ -18,6 +18,7 @@ EvaluationGranularityValue = Literal["L1", "L2", "L3"]
 KnowledgeBaseExportMode = Literal["documents", "full"]
 KnowledgeBaseIndexPolicy = Literal["strict", "rebuild"]
 RetrievalModeValue = Literal["auto", "single", "multi"]
+ParsingEngineCategory = Literal["ocr", "table", "layout"]
 
 
 def _normalize_scope(
@@ -149,6 +150,89 @@ class DocumentRead(ORMModel):
 
 class DocumentDetail(DocumentRead):
     extracted_text: str
+
+
+class DocumentTableRead(ORMModel):
+    id: str
+    document_id: str
+    kb_id: str
+    page_start: int
+    page_end: int
+    bbox: list[float] = Field(default_factory=list)
+    layout_block_id: str = ""
+    caption: str = ""
+    cells: list[dict[str, Any]] = Field(default_factory=list)
+    headers: list[Any] = Field(default_factory=list)
+    rows: list[Any] = Field(default_factory=list)
+    markdown: str = ""
+    description: str = ""
+    description_meta: dict[str, Any] = Field(default_factory=dict)
+    extraction_engine: str = ""
+    quality_score: float = 0
+    quality_json: dict[str, Any] = Field(default_factory=dict)
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class TableContextRead(BaseModel):
+    id: str
+    caption: str = ""
+    page_start: int = 1
+    page_end: int = 1
+    markdown: str = ""
+    description: str = ""
+    extraction_engine: str = ""
+    quality_score: float = 0
+    injected_mode: str = ""
+
+
+class ParsingEngineAdapterRead(BaseModel):
+    category: ParsingEngineCategory
+    adapter: str
+    label: str
+    description: str
+    config_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class ParsingEngineCreate(BaseModel):
+    category: ParsingEngineCategory
+    adapter: str = Field(min_length=1, max_length=80)
+    display_name: str = Field(min_length=1, max_length=120)
+    priority: int = Field(default=100, ge=0, le=10000)
+    enabled: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ParsingEngineUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    priority: int | None = Field(default=None, ge=0, le=10000)
+    enabled: bool | None = None
+    config: dict[str, Any] | None = None
+
+
+class ParsingEngineRead(ORMModel):
+    id: str
+    category: str
+    adapter: str
+    display_name: str
+    priority: int
+    enabled: bool
+    config: dict[str, Any] = Field(default_factory=dict)
+    health: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ParsingEngineReorder(BaseModel):
+    category: ParsingEngineCategory
+    engine_ids: list[str] = Field(default_factory=list)
+
+
+class ParsingEngineTestResult(BaseModel):
+    ok: bool
+    message: str
+    latency_ms: float = 0
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class QAPairRead(BaseModel):
@@ -318,6 +402,12 @@ class BatchUploadResponse(BaseModel):
     failed: int
 
 
+class ReparsePdfResponse(BaseModel):
+    queued: int = 0
+    skipped: int = 0
+    job_ids: list[str] = Field(default_factory=list)
+
+
 class ServerArchiveRequest(BaseModel):
     path: str = Field(min_length=1, max_length=2000)
     chunk_mode: ChunkModeValue | None = None
@@ -389,6 +479,7 @@ class SearchResult(BaseModel):
     context_prefix: str = ""
     context_text: str = ""
     matched_questions: list[str] = Field(default_factory=list)
+    tables: list[TableContextRead] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     file_url: str | None = None
     preview_url: str | None = None

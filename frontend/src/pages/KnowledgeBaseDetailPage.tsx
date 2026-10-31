@@ -1,6 +1,6 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Bot, Download, FileText, Pencil, RefreshCw, Search, Trash2, UploadCloud } from "lucide-react";
+import { ArrowLeft, Bot, Download, FileText, Pencil, RefreshCw, ScanText, Search, Trash2, UploadCloud } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api, downloadKnowledgeBasePackage } from "../api/client";
 import { EmptyState, ErrorState, LoadingState, Modal, PageHeader, StatusBadge, formatBytes, formatDate } from "../components/UI";
@@ -119,6 +119,13 @@ export default function KnowledgeBaseDetailPage() {
     mutationFn: api.reindexDocument,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["documents", kbId] }),
   });
+  const reparsePdfMutation = useMutation({
+    mutationFn: () => api.reparsePdfDocuments(kbId),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["documents", kbId] });
+      window.alert(`已排队 ${result.queued} 个 PDF，跳过 ${result.skipped} 个。`);
+    },
+  });
   const rebuildIndexMutation = useMutation({
     mutationFn: () => api.rebuildKnowledgeBaseIndex(kbId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["knowledge-base", kbId] }),
@@ -156,7 +163,7 @@ export default function KnowledgeBaseDetailPage() {
   if (kbQuery.error) return <ErrorState message={kbQuery.error.message} />;
   const kb = kbQuery.data!;
   const documents = docsQuery.data ?? [];
-  const actionError = deleteDocMutation.error ?? reindexMutation.error ?? rebuildIndexMutation.error;
+  const actionError = deleteDocMutation.error ?? reindexMutation.error ?? rebuildIndexMutation.error ?? reparsePdfMutation.error;
 
   return (
     <div>
@@ -179,6 +186,16 @@ export default function KnowledgeBaseDetailPage() {
               className="btn-secondary"
             >
               <RefreshCw className="h-4 w-4" />重建增强索引
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm("确认使用当前解析引擎重新解析该知识库的全部 PDF？现有分块和索引将在各自任务中替换。")) reparsePdfMutation.mutate();
+              }}
+              disabled={reparsePdfMutation.isPending}
+              className="btn-secondary"
+            >
+              <ScanText className="h-4 w-4" />重新解析 PDF
             </button>
             <Link to={`/upload?kb=${kb.id}`} className="btn-primary"><UploadCloud className="h-4 w-4" />上传文档</Link>
             <Link to={`/search-quality?kb=${kb.id}`} className="btn-secondary"><Search className="h-4 w-4" />检索质检</Link>

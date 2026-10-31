@@ -25,6 +25,7 @@ from app.db.models import (
     Document,
     DocumentChunk,
     DocumentStatus,
+    DocumentTable,
     KnowledgeBase,
     KnowledgeBaseTransferJob,
     ModelKind,
@@ -39,7 +40,7 @@ from app.services.ingestion_service import IngestionService
 
 logger = logging.getLogger(__name__)
 
-PACKAGE_SCHEMA_VERSION = 1
+PACKAGE_SCHEMA_VERSION = 2
 EXPORT_JOB_STALE_SECONDS = 6 * 60 * 60
 
 
@@ -173,8 +174,15 @@ class KnowledgeBaseTransferService:
             embedding_profile = db.get(ModelProfile, knowledge_base.embedding_profile_id)
             if embedding_profile is None or not embedding_profile.dimensions:
                 raise ValidationError("知识库 Embedding 模型不可用")
+            tables = list(
+                db.scalars(
+                    select(DocumentTable)
+                    .where(DocumentTable.kb_id == knowledge_base.id)
+                    .order_by(DocumentTable.document_id.asc(), DocumentTable.page_start.asc())
+                )
+            )
             manifest = self._build_manifest(
-                knowledge_base, documents, chunks, embedding_profile, job.mode, db
+                knowledge_base, documents, chunks, tables, embedding_profile, job.mode, db
             )
             file_hashes: dict[str, str] = {}
 
@@ -203,6 +211,11 @@ class KnowledgeBaseTransferService:
             chunk_bytes = _jsonl(chunk_records)
             (temp_dir / "chunks.jsonl").write_bytes(chunk_bytes)
             file_hashes["chunks.jsonl"] = _sha256_bytes(chunk_bytes)
+
+            table_records = [self._table_record(table) for table in tables]
+            table_bytes = _jsonl(table_records)
+            (temp_dir / "tables.jsonl").write_bytes(table_bytes)
+            file_hashes["tables.jsonl"] = _sha256_bytes(table_bytes)
 
             if job.mode == "full":
                 vector_rows = self.vector_store.export_representations(
@@ -294,6 +307,7 @@ class KnowledgeBaseTransferService:
         knowledge_base: KnowledgeBase,
         documents: list[Document],
         chunks: list[DocumentChunk],
+        tables: list[DocumentTable],
         embedding_profile: ModelProfile,
         mode: str,
         db: Session,
@@ -334,6 +348,7 @@ class KnowledgeBaseTransferService:
             "counts": {
                 "documents": len(documents),
                 "chunks": len(chunks),
+                "tables": len(tables),
             },
             "index": {
                 "version": "v2" if mode == "full" else None,
@@ -344,6 +359,7 @@ class KnowledgeBaseTransferService:
             "files": {
                 "documents": "documents.jsonl",
                 "chunks": "chunks.jsonl",
+                "tables": "tables.jsonl",
                 "vectors": "index/milvus_vectors.jsonl" if mode == "full" else None,
                 "bm25": "index/bm25_documents.jsonl" if mode == "full" else None,
             },
@@ -371,6 +387,31 @@ class KnowledgeBaseTransferService:
             "enrichment_status": chunk.enrichment_status,
             "enrichment_meta": dict(chunk.enrichment_meta or {}),
             "created_at": chunk.created_at,
+        }
+
+    @staticmethod
+    @staticmethod
+    def _table_record(table: DocumentTable) -> dict:
+        return {
+            "id": table.id,
+            "document_id": table.document_id,
+            "kb_id": table.kb_id,
+            "page_start": table.page_start,
+            "page_end": table.page_end,
+            "bbox": list(table.bbox or []),
+            "layout_block_id": table.layout_block_id,
+            "caption": table.caption,
+            "cells": list(table.cells or []),
+            "headers": list(table.headers or []),
+            "rows": list(table.rows or []),
+            "markdown": table.markdown,
+            "description": table.description,
+            "description_meta": dict(table.description_meta or {}),
+            "extraction_engine": table.extraction_engine,
+            "quality_score": table.quality_score,
+            "quality_json": dict(table.quality_json or {}),
+            "metadata_json": dict(table.metadata_json or {}),
+            "created_at": table.created_at,
         }
 
     @staticmethod
@@ -411,7 +452,7 @@ class KnowledgeBaseTransferService:
             if "manifest.json" not in names or "checksums.sha256" not in names:
                 raise ValidationError("知识库包缺少 manifest 或校验文件")
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
-            if int(manifest.get("schema_version", 0)) != PACKAGE_SCHEMA_VERSION:
+            if int(manifest.get("schema_version", 0)) not in {1, PACKAGE_SCHEMA_VERSION}:
                 raise ValidationError("不支持的知识库包版本")
             if manifest.get("mode") not in {"documents", "full"}:
                 raise ValidationError("知识库包模式无效")
@@ -524,11 +565,23 @@ class KnowledgeBaseTransferService:
             with zipfile.ZipFile(package_path) as archive:
                 document_records = _read_jsonl(archive, "documents.jsonl")
                 chunk_records = _read_jsonl(archive, "chunks.jsonl")
+                table_records = (
+                    _read_jsonl(archive, "tables.jsonl")
+                    if "tables.jsonl" in archive.namelist()
+                    else []
+                )
                 expected_counts = dict(manifest.get("counts") or {})
                 if len(document_records) != int(expected_counts.get("documents", 0)):
                     raise ValidationError("知识库包文档数量与 manifest 不一致")
                 if len(chunk_records) != int(expected_counts.get("chunks", 0)):
                     raise ValidationError("知识库包 chunk 数量与 manifest 不一致")
+                if "tables" in expected_counts and len(table_records) != int(expected_counts.get("tables", 0)):
+                    raise ValidationError("知识库包表格数量与 manifest 不一致")
+                table_map = {
+                    str(record.get("id")): str(uuid.uuid4())
+                    for record in table_records
+                    if record.get("id")
+                }
                 imported_kb = self._create_knowledge_base(
                     db, manifest, options, embedding, enrichment, rerank, llm
                 )
@@ -540,7 +593,10 @@ class KnowledgeBaseTransferService:
                     uploaded_keys,
                 )
                 chunk_map = self._create_chunks(
-                    db, imported_kb, chunk_records, document_map
+                    db, imported_kb, chunk_records, document_map, table_map
+                )
+                self._create_tables(
+                    db, imported_kb, table_records, document_map, table_map
                 )
                 db.commit()
                 job.result_knowledge_base_id = imported_kb.id
@@ -715,8 +771,10 @@ class KnowledgeBaseTransferService:
         knowledge_base: KnowledgeBase,
         records: list[dict],
         document_map: dict[str, str],
+        table_map: dict[str, str] | None = None,
     ) -> dict[str, str]:
         chunk_map = {str(record.get("id")): str(uuid.uuid4()) for record in records}
+        table_map = table_map or {}
         for record in records:
             old_id = str(record.get("id"))
             old_document_id = str(record.get("document_id"))
@@ -734,6 +792,11 @@ class KnowledgeBaseTransferService:
                 metadata_json["parent_chunk_id"] = chunk_map.get(
                     str(metadata_json["parent_chunk_id"])
                 )
+            if metadata_json.get("table_ids"):
+                metadata_json["table_ids"] = [
+                    table_map.get(str(item), str(item))
+                    for item in metadata_json["table_ids"]
+                ]
             enrichment_meta = dict(record.get("enrichment_meta") or {})
             db.add(
                 DocumentChunk(
@@ -759,6 +822,46 @@ class KnowledgeBaseTransferService:
             )
         db.flush()
         return chunk_map
+
+    @staticmethod
+    def _create_tables(
+        db: Session,
+        knowledge_base: KnowledgeBase,
+        records: list[dict],
+        document_map: dict[str, str],
+        table_map: dict[str, str],
+    ) -> None:
+        for record in records:
+            old_id = str(record.get("id") or "")
+            old_document_id = str(record.get("document_id") or "")
+            if not old_id or old_id not in table_map:
+                raise ValidationError("表格记录缺少有效 id")
+            if old_document_id not in document_map:
+                raise ValidationError("表格引用了不存在的文档")
+            metadata_json = dict(record.get("metadata_json") or {})
+            db.add(
+                DocumentTable(
+                    id=table_map[old_id],
+                    document_id=document_map[old_document_id],
+                    kb_id=knowledge_base.id,
+                    page_start=int(record.get("page_start") or 1),
+                    page_end=int(record.get("page_end") or record.get("page_start") or 1),
+                    bbox=list(record.get("bbox") or []),
+                    layout_block_id=str(record.get("layout_block_id") or ""),
+                    caption=str(record.get("caption") or ""),
+                    cells=list(record.get("cells") or []),
+                    headers=list(record.get("headers") or []),
+                    rows=list(record.get("rows") or []),
+                    markdown=str(record.get("markdown") or ""),
+                    description=str(record.get("description") or ""),
+                    description_meta=dict(record.get("description_meta") or {}),
+                    extraction_engine=str(record.get("extraction_engine") or ""),
+                    quality_score=float(record.get("quality_score") or 0),
+                    quality_json=dict(record.get("quality_json") or {}),
+                    metadata_json=metadata_json,
+                )
+            )
+        db.flush()
 
     def _restore_vectors(
         self,

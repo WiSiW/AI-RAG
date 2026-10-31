@@ -24,6 +24,7 @@
 - 模型配置管理：LLM、分块增强、Embedding、Rerank，支持连通性测试
 - 知识库管理：固定 Embedding、分块增强与默认问答模型，配置召回、权重与重排参数
 - 文档格式：PDF、DOCX、Markdown、EPUB
+- 独立 `pdf-process` PDF 处理服务：RapidOCR/Tesseract OCR、LayoutParser/Detectron2 版面分析、内网 multipart/JSON API
 - MinIO 原始文件存储，Celery + Redis 异步入库
 - 章节优先、token 感知、带重叠的分块
 - 分块关键词、约 50 字摘要与 3 个多样化 QA 对生成，失败自动规则回退
@@ -55,10 +56,22 @@ flowchart LR
     Q --> M
     Q --> V
     Q --> B[Whoosh BM25 索引]
+    Q -->|OCR multipart / 版面 JSON| X[pdf-process]
     A --> L[OpenAI-compatible LLM API]
     A --> E[OpenAI-compatible Embedding API]
     A --> K[Rerank HTTP API]
 ```
+
+### PDF Process 服务
+
+`pdf-process` 是默认启动的独立 PDF 视觉处理服务，Compose 内网地址为 `http://pdf-process:8020`。
+
+- 提供 `/ocr` multipart 接口，支持 RapidOCR 与 Tesseract；OCR 引擎排序、质量检测和回退仍由后端控制。
+- 提供 `/analyze` 版面分析接口，使用 LayoutParser/Detectron2 返回标题、正文、表格、图片等区域。
+- `/health` 分别报告 RapidOCR、Tesseract 与版面模型状态；OCR 可用而模型权重缺失时仍保持服务健康。
+- 默认仅暴露在 Compose 内网，不映射宿主机端口；可通过 `ZHIYUAN_PDF_PROCESS_API_KEY` 启用 Bearer Token。
+- 版面模型从 `data/models/layout/config.yaml` 和 `model_final.pth` 只读挂载；缺失时后端退化为几何版面规则。
+- 服务详细接口、错误码与部署说明见 [pdf_process_service/README.md](pdf_process_service/README.md)。
 
 ### 文档入库
 
@@ -107,6 +120,7 @@ AI-RAG/
 │       ├── components/
 │       ├── pages/
 │       └── types/
+├── pdf_process_service/     # OCR 与版面分析服务
 ├── docs/
 ├── docker-compose.yml
 ├── .env.example
@@ -149,7 +163,7 @@ docker compose up -d --build
 
 ```powershell
 docker compose ps
-docker compose logs -f backend worker
+docker compose logs -f backend worker pdf-process pdf-worker
 ```
 
 ## 首次使用流程
@@ -275,6 +289,12 @@ npm.cmd run build
 | `ZHIYUAN_QA_GENERATION_MAX_TOKENS` | QA 对生成输出上限，默认 4096 |
 | `ZHIYUAN_MULTIHOP_CLASSIFIER_URL` | 外部 BERT 多跳分类器地址；为空时规则+LLM 降级 |
 | `ZHIYUAN_MULTIHOP_MAX_STEPS` | 多跳检索默认最大轮数，默认 3 |
+| `ZHIYUAN_PDF_PROCESS_SERVICE_URL` | `pdf-process` 服务地址，Compose 默认 `http://pdf-process:8020` |
+| `ZHIYUAN_PDF_PROCESS_API_KEY` | `pdf-process` 可选 Bearer Token |
+| `ZHIYUAN_PDF_OCR_TIMEOUT_SECONDS` | OCR 请求超时，默认 120 秒 |
+| `ZHIYUAN_PDF_OCR_MAX_IMAGE_MB` | 单页 OCR 图像上限，默认 30 MB |
+| `ZHIYUAN_PDF_OCR_CIRCUIT_FAILURE_THRESHOLD` | OCR 服务连接熔断阈值 |
+| `ZHIYUAN_PDF_OCR_CIRCUIT_COOLDOWN_SECONDS` | OCR 熔断冷却时间 |
 
 ## 安全边界
 
@@ -286,7 +306,8 @@ npm.cmd run build
 
 ## 当前限制
 
-- 暂不支持扫描 PDF/图片 OCR。
+- 扫描 PDF 依赖默认启动的 PDF 处理服务（Compose 服务名为 `pdf-process`），服务内提供 RapidOCR/Tesseract；任一引擎不可用时由解析引擎页显示状态并自动尝试下一引擎。
+- PDF 处理服务默认使用 CPU，并通过内网 multipart 接口接收页面图像；LayoutParser/Detectron2 模型权重需自行挂载，缺失时退化为几何版面规则。
 - 一个知识库只能使用一个 Embedding 模型。
 - Whoosh 索引适合单机中小规模；更大规模建议替换为 OpenSearch/Elasticsearch。
 - Celery Worker 当前建议并发数为 1，避免 Whoosh 单写者竞争。

@@ -16,6 +16,7 @@ from app.db.models import (
     Document,
     DocumentChunk,
     DocumentStatus,
+    DocumentTable,
     KnowledgeBase,
     ModelKind,
     ModelProfile,
@@ -47,6 +48,7 @@ from app.schemas import (
     SearchRequest,
     SearchResponse,
     SearchResult,
+    TableContextRead,
     TraceChunkSnapshot,
 )
 
@@ -728,9 +730,58 @@ class ChatService:
         return chunks
 
     @staticmethod
+    def _attach_search_table_refs(db: Session, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        seen_tables: set[str] = set()
+        for chunk in chunks:
+            row = db.get(DocumentChunk, chunk.chunk_id)
+            if row is None:
+                continue
+            table_ids = list((row.metadata_json or {}).get("table_ids") or [])
+            if not table_ids and row.parent_chunk_id:
+                parent = db.get(DocumentChunk, row.parent_chunk_id)
+                table_ids = list((parent.metadata_json or {}).get("table_ids") or []) if parent else []
+            if not table_ids:
+                continue
+            tables = list(
+                db.scalars(
+                    select(DocumentTable).where(DocumentTable.id.in_(list(dict.fromkeys(table_ids))))
+                )
+            )
+            refs = []
+            used_tokens = 0
+            for table in tables:
+                if table.id in seen_tables:
+                    continue
+                seen_tables.add(table.id)
+                full_text = f"[关联表格]\n{table.caption}\n{table.markdown}".strip()
+                full_tokens = count_tokens(full_text)
+                if used_tokens + full_tokens <= settings.rag_table_context_tokens:
+                    injected_mode = "full"
+                    used_tokens += full_tokens
+                else:
+                    injected_mode = "description"
+                    used_tokens += count_tokens(table.description)
+                refs.append(
+                    {
+                        "id": table.id,
+                        "caption": table.caption,
+                        "page_start": table.page_start,
+                        "page_end": table.page_end,
+                        "markdown": table.markdown if injected_mode == "full" else "",
+                        "description": table.description,
+                        "extraction_engine": table.extraction_engine,
+                        "quality_score": table.quality_score,
+                        "injected_mode": injected_mode,
+                    }
+                )
+            chunk.metadata["context_tables"] = refs
+        return chunks
+
+    @staticmethod
     def _expand_context_windows(
         db: Session, chunks: list[RetrievedChunk]
     ) -> list[RetrievedChunk]:
+        seen_tables: set[str] = set()
         for chunk in chunks:
             row = db.get(DocumentChunk, chunk.chunk_id)
             if row is None:
@@ -763,7 +814,7 @@ class ChatService:
             prefix = row.context_prefix or str(chunk.metadata.get("context_prefix") or "")
             parts = [prefix] if prefix else []
             parts.append(f"[命中片段]\n{row.content}")
-            included = {"parent": False, "previous": False, "next": False}
+            included = {"parent": False, "previous": False, "next": False, "tables": False}
 
             parent_window = clip_around_anchor(
                 parent_text,
@@ -779,6 +830,64 @@ class ChatService:
                 if parent_context:
                     parts.append(f"[父文档局部上下文]\n{parent_context}")
                     included["parent"] = True
+
+            table_ids = list((row.metadata_json or {}).get("table_ids") or [])
+            if not table_ids and anchor_row.id != row.id:
+                table_ids = list((anchor_row.metadata_json or {}).get("table_ids") or [])
+            context_tables: list[dict] = []
+            table_budget = max(0, settings.rag_table_context_tokens)
+            used_table_tokens = 0
+            if table_ids:
+                tables = list(
+                    db.scalars(
+                        select(DocumentTable)
+                        .where(DocumentTable.id.in_(list(dict.fromkeys(table_ids))))
+                        .order_by(DocumentTable.page_start.asc(), DocumentTable.created_at.asc())
+                    )
+                )
+                for table in tables:
+                    if table.id in seen_tables:
+                        continue
+                    seen_tables.add(table.id)
+                    if used_table_tokens >= table_budget:
+                        break
+                    base_tokens = count_tokens("\n\n".join(parts))
+                    remaining = min(
+                        table_budget - used_table_tokens,
+                        settings.rag_context_window_max_tokens - base_tokens,
+                    )
+                    if remaining <= 0:
+                        break
+                    full_text = f"[关联表格]\n{table.caption}\n{table.markdown}".strip()
+                    if table.markdown and table.markdown in row.content:
+                        injected_mode = "existing_chunk"
+                    elif count_tokens(full_text) <= remaining:
+                        parts.append(full_text)
+                        injected_mode = "full"
+                        used_table_tokens += count_tokens(full_text)
+                    else:
+                        description = table.description or "完整表格已独立存储，请查看原始文档。"
+                        description = clip_head_tokens(description, remaining)
+                        if not description:
+                            break
+                        parts.append(f"[关联表格摘要]\n{table.caption}\n{description}".strip())
+                        injected_mode = "description"
+                        used_table_tokens += count_tokens(parts[-1])
+                    context_tables.append(
+                        {
+                            "id": table.id,
+                            "caption": table.caption,
+                            "page_start": table.page_start,
+                            "page_end": table.page_end,
+                            "markdown": table.markdown if injected_mode == "full" else "",
+                            "description": table.description,
+                            "extraction_engine": table.extraction_engine,
+                            "quality_score": table.quality_score,
+                            "injected_mode": injected_mode,
+                        }
+                    )
+                included["tables"] = bool(context_tables)
+            chunk.metadata["context_tables"] = context_tables
 
             previous_row = db.scalar(
                 select(DocumentChunk)
@@ -967,7 +1076,7 @@ class ChatService:
             enforce_context_budget=False,
             retrieval_mode=request.retrieval_mode,
         )
-        chunks = outcome.chunks
+        chunks = ChatService._attach_search_table_refs(db, outcome.chunks)
         results: list[SearchResult] = []
         for chunk in chunks:
             relevance_score, relevance_source = resolve_search_relevance(
@@ -1009,6 +1118,11 @@ class ChatService:
                     context_prefix=str(chunk.metadata.get("context_prefix", "")),
                     context_text=chunk.context_text or chunk.content,
                     matched_questions=list(chunk.metadata.get("matched_questions") or []),
+                    tables=[
+                        TableContextRead(**item)
+                        for item in (chunk.metadata.get("context_tables") or [])
+                        if isinstance(item, dict)
+                    ],
                     metadata=chunk.metadata,
                     file_url=file_url,
                     preview_url=preview_url,

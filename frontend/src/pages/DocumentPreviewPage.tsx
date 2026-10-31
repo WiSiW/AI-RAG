@@ -1,14 +1,14 @@
 import { Children, cloneElement, isValidElement, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Bot, ClipboardCheck, FileText, Hash, Layers3, Search, Sparkles, X } from "lucide-react";
+import { ArrowLeft, Bot, ClipboardCheck, FileText, Hash, Layers3, Search, Sparkles, Table2, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
 import { api } from "../api/client";
 import { ErrorState, LoadingState, PageHeader, StatusBadge, formatBytes } from "../components/UI";
-import type { Chunk, QAPair } from "../types";
+import type { Chunk, DocumentTable, QAPair } from "../types";
 
 export default function DocumentPreviewPage() {
   const { documentId = "" } = useParams();
@@ -21,8 +21,10 @@ export default function DocumentPreviewPage() {
 
   const documentQuery = useQuery({ queryKey: ["document", documentId], queryFn: () => api.getDocument(documentId), enabled: !!documentId });
   const chunksQuery = useQuery({ queryKey: ["chunks", documentId], queryFn: () => api.listChunks(documentId), enabled: !!documentId });
+  const tablesQuery = useQuery({ queryKey: ["document-tables", documentId], queryFn: () => api.listDocumentTables(documentId), enabled: !!documentId });
   const contentQuery = useQuery({ queryKey: ["document-content", documentId], queryFn: () => api.getDocumentContent(documentId), enabled: !!documentId });
   const chunks = chunksQuery.data ?? [];
+  const tables = tablesQuery.data ?? [];
 
   const searchTerms = useMemo(() => toSearchTerms(submittedQuery), [submittedQuery]);
   const filteredChunks = useMemo(
@@ -71,10 +73,11 @@ export default function DocumentPreviewPage() {
     return `/documents/${documentId}?${next.toString()}`;
   }
 
-  if (documentQuery.isLoading || chunksQuery.isLoading || contentQuery.isLoading) return <LoadingState />;
+  if (documentQuery.isLoading || chunksQuery.isLoading || contentQuery.isLoading || tablesQuery.isLoading) return <LoadingState />;
   if (documentQuery.error) return <ErrorState message={documentQuery.error.message} />;
   if (chunksQuery.error) return <ErrorState message={chunksQuery.error.message} />;
   if (contentQuery.error) return <ErrorState message={contentQuery.error.message} />;
+  if (tablesQuery.error) return <ErrorState message={tablesQuery.error.message} />;
 
   const document = documentQuery.data!;
   const content = contentQuery.data!;
@@ -109,9 +112,13 @@ export default function DocumentPreviewPage() {
           <Metadata label="页数 / 章节" value={String(document.metadata_json.pages ?? document.metadata_json.chapter_count ?? document.metadata_json.section_count ?? "-")} />
           <Metadata label="字符数" value={String(document.metadata_json.characters ?? content.text.length)} />
           <Metadata label="上传来源" value={String(document.metadata_json.upload_source ?? "browser")} />
+          <Metadata label="PDF 解析状态" value={String(pdfPipeline(document).status ?? "-")} />
+          <Metadata label="原生 / OCR / 失败页" value={`${String(pdfPipeline(document).native_pages ?? 0)} / ${String(pdfPipeline(document).ocr_pages ?? 0)} / ${String((pdfPipeline(document).failed_pages as unknown[] | undefined)?.length ?? 0)}`} />
+          <Metadata label="独立表格" value={String(tables.length)} />
         </div>
       </div>
 
+      {tables.length > 0 && <TableGallery tables={tables} />}
       <div className="grid min-h-[68vh] gap-5 xl:grid-cols-[430px_1fr]">
         <section className="panel flex max-h-[76vh] min-h-[520px] flex-col overflow-hidden">
           <div className="border-b border-slate-100 px-4 py-3.5">
@@ -248,6 +255,29 @@ export default function DocumentPreviewPage() {
         </section>
       </div>
     </div>
+  );
+}
+
+function pdfPipeline(document: { metadata_json: Record<string, unknown> }): Record<string, unknown> {
+  return (document.metadata_json.pdf_pipeline as Record<string, unknown>) ?? {};
+}
+
+function TableGallery({ tables }: { tables: DocumentTable[] }) {
+  return (
+    <section className="panel mb-4 p-4">
+      <div className="flex items-center gap-2"><Table2 className="h-4 w-4 text-brand-600" /><div className="font-semibold text-slate-900">结构化表格</div><span className="chip bg-brand-50 text-brand-700">{tables.length}</span></div>
+      <div className="mt-3 grid gap-3 xl:grid-cols-2">
+        {tables.map((table) => (
+          <details key={table.id} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+            <summary className="cursor-pointer list-none">
+              <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-slate-800"><span>{table.caption || "未命名表格"}</span><span className="chip bg-white text-[10px]">第 {table.page_start}-{table.page_end} 页</span><span className="chip bg-emerald-50 text-[10px] text-emerald-700">{table.extraction_engine || "unknown"}</span><span className="ml-auto font-mono text-[10px] text-slate-400">Q {table.quality_score.toFixed(2)}</span></div>
+              <div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">{table.description || "暂无表格描述"}</div>
+            </summary>
+            <div className="mt-3 overflow-x-auto rounded-lg bg-white p-3"><ReactMarkdown remarkPlugins={[remarkGfm]}>{table.markdown || "无 Markdown 内容"}</ReactMarkdown></div>
+          </details>
+        ))}
+      </div>
+    </section>
   );
 }
 

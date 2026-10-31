@@ -10,6 +10,7 @@ import KnowledgeBaseDetailPage from "./pages/KnowledgeBaseDetailPage";
 import KnowledgeBasesPage from "./pages/KnowledgeBasesPage";
 import LoginPage from "./pages/LoginPage";
 import ModelsPage from "./pages/ModelsPage";
+import ParsingEnginesPage from "./pages/ParsingEnginesPage";
 import SearchQualityPage from "./pages/SearchQualityPage";
 import NotFoundPage from "./pages/NotFoundPage";
 import UploadPage from "./pages/UploadPage";
@@ -29,6 +30,7 @@ export default function App() {
         <Route path="/upload" element={<UploadPage />} />
         <Route path="/documents/:documentId" element={<DocumentPreviewPage />} />
         <Route path="/models" element={<ModelsPage />} />
+        <Route path="/parsing-engines" element={<ParsingEnginesPage />} />
         <Route path="/search-quality" element={<SearchQualityPage />} />
         <Route path="/chunk-evaluations" element={<ChunkEvaluationPage />} />
         <Route path="/api-publishing" element={<ApiPublishingPage />} />

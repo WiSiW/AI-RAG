@@ -42,6 +42,22 @@ class Settings(BaseSettings):
     kb_package_max_mb: int = 8192
     upload_temp_dir: str = "data/uploads"
     import_root: str = "data/imports"
+    pdf_ocr_dpi: int = 300
+    pdf_ocr_timeout_seconds: float = 120.0
+    pdf_ocr_max_image_mb: int = 30
+    pdf_ocr_circuit_failure_threshold: int = 2
+    pdf_ocr_circuit_cooldown_seconds: float = 30.0
+    pdf_ocr_min_chars: int = 20
+    pdf_ocr_min_confidence: float = 0.55
+    pdf_ocr_max_corruption_ratio: float = 0.01
+    pdf_ocr_max_repetition_ratio: float = 0.35
+    pdf_process_service_url: str = ""
+    pdf_process_api_key_env: str = "ZHIYUAN_PDF_PROCESS_API_KEY"
+    pdf_layout_timeout_seconds: float = 10.0
+    pdf_table_timeout_seconds: float = 60.0
+    rag_table_context_tokens: int = 1000
+    pdf_parse_task_time_limit: int = 7200
+    pdf_parse_task_soft_time_limit: int = 6900
     public_base_url: str = ""
     public_file_expire_minutes: int = 60
     model_request_timeout: float = 120.0
@@ -76,6 +92,9 @@ class Settings(BaseSettings):
     multihop_planner_context_tokens: int = 5000
 
     @property
+    def resolved_pdf_process_service_url(self) -> str:
+        return self.pdf_process_service_url.rstrip("/")
+    @property
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
 
@@ -98,6 +117,5 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-
 
 

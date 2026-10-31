@@ -79,6 +79,8 @@ services:
     image: ai-rag-backend:latest
     env_file:
       - .env
+    environment:
+      ZHIYUAN_PDF_PROCESS_SERVICE_URL: http://pdf-process:8020
     ports:
       - "8000:8000"
     depends_on:
@@ -108,9 +110,61 @@ services:
         condition: service_started
       milvus:
         condition: service_started
-    command: celery -A app.workers.celery_app:celery_app worker --loglevel=INFO --concurrency=1
+    command: celery -A app.workers.celery_app:celery_app worker -Q celery --loglevel=INFO --concurrency=1
     volumes:
       - app_data:/app/data
+    restart: unless-stopped
+
+  pdf-worker:
+    image: ai-rag-backend:latest
+    env_file:
+      - .env
+    environment:
+      ZHIYUAN_PDF_PROCESS_SERVICE_URL: http://pdf-process:8020
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      milvus:
+        condition: service_started
+      pdf-process:
+        condition: service_healthy
+    command: celery -A app.workers.celery_app:celery_app worker -Q pdf_parse --loglevel=INFO --concurrency=1
+    volumes:
+      - app_data:/app/data
+    restart: unless-stopped
+
+  # pdf-process: PDF 视觉处理服务。
+  # 功能：RapidOCR/Tesseract OCR + LayoutParser/Detectron2 版面分析。
+  # 网络：仅供 backend/pdf-worker 通过 Compose 内网访问，不映射宿主机端口。
+  # 模型：./data/models/layout 需包含 config.yaml 与 model_final.pth。
+  pdf-process:
+    build:
+      context: ./pdf_process_service
+    image: ai-rag-pdf-process:latest
+    labels:
+      com.zhiyuan.service.name: "pdf-process"
+      com.zhiyuan.service.capabilities: "rapidocr,tesseract,layout-analysis"
+      com.zhiyuan.service.api: "/health,/ocr,/analyze"
+    environment:
+      PDF_PROCESS_LAYOUT_MODEL_DIR: /models/layout
+      PDF_PROCESS_LAYOUT_DEVICE: cpu
+      PDF_PROCESS_MAX_IMAGE_MB: ${ZHIYUAN_PDF_OCR_MAX_IMAGE_MB:-30}
+      PDF_PROCESS_API_KEY: ${ZHIYUAN_PDF_PROCESS_API_KEY:-}
+    expose:
+      - "8020"
+    volumes:
+      # 版面模型只读挂载；OCR 模型随镜像/运行环境提供。
+      - ./data/models:/models:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8020/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
     restart: unless-stopped
 
   multihop-classifier:

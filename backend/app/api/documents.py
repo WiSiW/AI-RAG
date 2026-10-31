@@ -27,6 +27,7 @@ from app.db.models import (
     Document,
     DocumentChunk,
     DocumentStatus,
+    DocumentTable,
     IngestionJob,
     JobStatus,
     KnowledgeBase,
@@ -41,7 +42,9 @@ from app.schemas import (
     ChunkRead,
     DocumentDetail,
     DocumentRead,
+    DocumentTableRead,
     IngestionJobRead,
+    ReparsePdfResponse,
     ServerArchiveRequest,
     UploadResponse,
 )
@@ -81,8 +84,12 @@ def _job_read(job: IngestionJob) -> IngestionJobRead:
 
 def _enqueue(document: Document, job: IngestionJob) -> bool:
     try:
+        queue = "pdf_parse" if document.filename.lower().endswith(".pdf") else "celery"
         celery_app.send_task(
-            "zhiyuan.ingest_document", args=[document.id, job.id], task_id=job.id
+            "zhiyuan.ingest_document",
+            args=[document.id, job.id],
+            task_id=job.id,
+            queue=queue,
         )
         return True
     except Exception as exc:
@@ -662,6 +669,35 @@ def get_document_chunk(
     return ChunkRead.model_validate(chunk)
 
 
+@router.get("/documents/{document_id}/tables", response_model=list[DocumentTableRead])
+def list_document_tables(
+    document_id: str,
+    _: str = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+) -> list[DocumentTableRead]:
+    if db.get(Document, document_id) is None:
+        raise NotFoundError("文档不存在")
+    tables = db.scalars(
+        select(DocumentTable)
+        .where(DocumentTable.document_id == document_id)
+        .order_by(DocumentTable.page_start.asc(), DocumentTable.created_at.asc())
+    )
+    return [DocumentTableRead.model_validate(table) for table in tables]
+
+
+@router.get("/documents/{document_id}/tables/{table_id}", response_model=DocumentTableRead)
+def get_document_table(
+    document_id: str,
+    table_id: str,
+    _: str = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+) -> DocumentTableRead:
+    table = db.get(DocumentTable, table_id)
+    if table is None or table.document_id != document_id:
+        raise NotFoundError("表格不存在")
+    return DocumentTableRead.model_validate(table)
+
+
 @router.post("/documents/{document_id}/reindex", response_model=IngestionJobRead)
 def reindex_document(
     document_id: str,
@@ -688,6 +724,45 @@ def reindex_document(
     db.commit()
     db.refresh(job)
     return _job_read(job)
+
+
+@router.post("/knowledge-bases/{kb_id}/documents/reparse-pdfs", response_model=ReparsePdfResponse)
+def reparse_pdf_documents(
+    kb_id: str,
+    _: str = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+) -> ReparsePdfResponse:
+    _get_kb(db, kb_id)
+    _ensure_kb_writable(db, kb_id)
+    documents = list(
+        db.scalars(
+            select(Document).where(
+                Document.kb_id == kb_id,
+                func.lower(Document.filename).like("%.pdf"),
+            )
+        )
+    )
+    job_ids: list[str] = []
+    skipped = 0
+    for document in documents:
+        if document.status in {DocumentStatus.PENDING, DocumentStatus.PROCESSING}:
+            skipped += 1
+            continue
+        document.status = DocumentStatus.PENDING
+        document.error = None
+        job = IngestionJob(
+            id=str(uuid.uuid4()),
+            document_id=document.id,
+            status=JobStatus.PENDING,
+        )
+        db.add(job)
+        db.flush()
+        if _enqueue(document, job):
+            job_ids.append(job.id)
+        else:
+            skipped += 1
+    db.commit()
+    return ReparsePdfResponse(queued=len(job_ids), skipped=skipped, job_ids=job_ids)
 
 
 @router.delete("/documents/{document_id}", status_code=204)

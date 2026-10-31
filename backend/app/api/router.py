@@ -11,6 +11,7 @@ from app.api import (
     knowledge_base_transfers,
     knowledge_bases,
     model_profiles,
+    parsing_engines,
     public_api,
     publications,
     system,
@@ -21,6 +22,7 @@ api_router.include_router(auth.router)
 api_router.include_router(health.router)
 api_router.include_router(system.router)
 api_router.include_router(model_profiles.router)
+api_router.include_router(parsing_engines.router)
 api_router.include_router(knowledge_bases.router)
 api_router.include_router(knowledge_base_transfers.router)
 api_router.include_router(documents.router)

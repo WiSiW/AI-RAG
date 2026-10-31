@@ -2,6 +2,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
+from app.core.config import settings
 from app.db.models import KnowledgeBase
 from app.db.session import SessionLocal
 from app.evaluation.service import ChunkEvaluationService
@@ -12,7 +13,13 @@ from app.workers.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(name="zhiyuan.ingest_document", bind=True, max_retries=2)
+@celery_app.task(
+    name="zhiyuan.ingest_document",
+    bind=True,
+    max_retries=2,
+    time_limit=settings.pdf_parse_task_time_limit,
+    soft_time_limit=settings.pdf_parse_task_soft_time_limit,
+)
 def ingest_document_task(self, document_id: str, job_id: str) -> None:
     db = SessionLocal()
     try:

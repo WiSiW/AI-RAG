@@ -1,7 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import Document, DocumentChunk, DocumentStatus
+from app.db.models import Document, DocumentChunk, DocumentStatus, DocumentTable
 from app.db.session import Base
 from app.generation.prompts import build_context_prompt
 from app.indexing.types import RetrievedChunk
@@ -225,3 +225,60 @@ class SimpleChunk:
         self.granularity_level = granularity_level
         self.summary = summary
         self.context_prefix = ""
+def test_hit_chunk_injects_linked_table_context():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        document = Document(
+            id="doc-table",
+            kb_id="kb-table",
+            filename="report.pdf",
+            object_key="objects/report.pdf",
+            status=DocumentStatus.READY,
+            metadata_json={"title": "季度报告"},
+        )
+        chunk = DocumentChunk(
+            id="chunk-table",
+            document_id=document.id,
+            kb_id="kb-table",
+            chunk_index=0,
+            content="销售收入见下表。",
+            section_path="经营情况",
+            granularity_level="L2",
+            metadata_json={"table_ids": ["table-1"]},
+        )
+        table = DocumentTable(
+            id="table-1",
+            document_id=document.id,
+            kb_id="kb-table",
+            page_start=2,
+            page_end=2,
+            caption="季度收入",
+            headers=["产品", "收入"],
+            rows=[["产品A", "500"]],
+            markdown="| 产品 | 收入 |\n| --- | --- |\n| 产品A | 500 |",
+            description="产品A收入为500万美元。",
+            extraction_engine="pdfplumber",
+            quality_score=0.9,
+        )
+        db.add_all([document, chunk, table])
+        db.commit()
+
+        hit = RetrievedChunk(
+            chunk_id=chunk.id,
+            document_id=document.id,
+            kb_id=document.kb_id,
+            content="indexed",
+            section=chunk.section_path,
+            source=document.filename,
+        )
+        expanded = ChatService._expand_context_windows(db, ChatService._hydrate_chunks(db, [hit]))
+
+        assert "[关联表格]" in expanded[0].context_text
+        assert "| 产品A | 500 |" in expanded[0].context_text
+        assert expanded[0].metadata["context_tables"][0]["injected_mode"] == "full"
+        assert expanded[0].metadata["context_tables"][0]["id"] == "table-1"
+    finally:
+        db.close()
+        engine.dispose()

@@ -9,11 +9,13 @@ from sqlalchemy.orm import Session
 
 from app.chunking.modes import split_document, validate_chunk_mode
 from app.chunking.multigranularity import (
+    MAX_L3_PER_L2,
     GranuleSpec,
     build_l1_specs,
     build_l3_specs,
     build_section_units,
 )
+from app.chunking.semantic_chunker import count_tokens
 from app.core.config import settings
 from app.core.errors import NotFoundError, ValidationError
 from app.core.storage import download_bytes
@@ -21,6 +23,7 @@ from app.db.models import (
     Document,
     DocumentChunk,
     DocumentStatus,
+    DocumentTable,
     IngestionJob,
     JobStatus,
     KnowledgeBase,
@@ -33,9 +36,15 @@ from app.indexing.model_gateway import ModelGateway
 from app.indexing.qa_generator import QA_PROMPT_VERSION, QAGenerator, QASource
 from app.indexing.types import IndexedChunk, IndexedRepresentation
 from app.indexing.vector_store import MilvusVectorStore
+from app.parsing.base import ParsedTable
 from app.parsing.metadata import build_document_metadata
+from app.parsing.pdf_layout import build_layout_analyzer
+from app.parsing.pdf_ocr import build_ocr_engines
+from app.parsing.pdf_processor import PDFProcessingPipeline
+from app.parsing.pdf_tables import build_table_manager
 from app.parsing.registry import parse_document
 from app.retrieval.context_window import build_context_prefix, with_context_prefix
+from app.services.parsing_engine_service import engine_configs_for_run
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +86,25 @@ class IngestionService:
                 temp_path = temp_file.name
                 temp_file.write(download_bytes(document.object_key))
 
-            parsed = parse_document(temp_path)
+            pdf_pipeline_meta: dict = {}
+            if suffix == ".pdf":
+                engine_configs = engine_configs_for_run(db)
+                pdf_result = await PDFProcessingPipeline(
+                    ocr_engines=build_ocr_engines(engine_configs.get("ocr", [])),
+                    layout_analyzer=build_layout_analyzer(engine_configs.get("layout", [])),
+                    table_manager=build_table_manager(engine_configs.get("table", [])),
+                    enrichment_profile=enrichment_profile,
+                ).process(temp_path)
+                parsed = pdf_result.parsed
+                pdf_pipeline_meta = pdf_result.pipeline_meta
+            else:
+                parsed = parse_document(temp_path)
             parsed_metadata = build_document_metadata(temp_path, parsed)
-            document.metadata_json = {**(document.metadata_json or {}), **parsed_metadata}
+            document.metadata_json = {
+                **(document.metadata_json or {}),
+                **parsed_metadata,
+                **({"pdf_pipeline": pdf_pipeline_meta} if pdf_pipeline_meta else {}),
+            }
             try:
                 chunk_mode = validate_chunk_mode(document.chunk_mode)
             except ValueError:
@@ -97,10 +122,16 @@ class IngestionService:
             )
 
             db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document.id))
+            db.execute(delete(DocumentTable).where(DocumentTable.document_id == document.id))
             db.commit()
 
+            table_by_id = {table.id: table for table in parsed.tables}
             chunk_rows: list[DocumentChunk] = []
+            tables_by_chunk: dict[str, list[ParsedTable]] = {}
             for chunk in chunks:
+                metadata_json = dict(chunk.metadata)
+                table_ids = [str(item) for item in metadata_json.get("table_ids") or []]
+                chunk_tables = [table_by_id[item] for item in table_ids if item in table_by_id]
                 chunk_rows.append(
                     DocumentChunk(
                         id=str(uuid.uuid4()),
@@ -110,11 +141,41 @@ class IngestionService:
                         content=chunk.content,
                         section_path=chunk.section_path,
                         token_count=chunk.token_count,
-                        metadata_json=chunk.metadata,
+                        metadata_json=metadata_json,
+                        granule_type="table" if chunk_tables else "paragraph",
                     )
                 )
             db.add_all(chunk_rows)
+            for table in parsed.tables:
+                db.add(
+                    DocumentTable(
+                        id=table.id,
+                        document_id=document.id,
+                        kb_id=document.kb_id,
+                        page_start=table.page_start,
+                        page_end=table.page_end,
+                        bbox=table.bbox,
+                        layout_block_id=table.layout_block_id,
+                        caption=table.caption,
+                        cells=table.cells,
+                        headers=table.headers,
+                        rows=table.rows,
+                        markdown=table.markdown,
+                        description=table.description,
+                        description_meta=table.description_meta,
+                        extraction_engine=table.extraction_engine,
+                        quality_score=table.quality_score,
+                        quality_json=table.quality_json,
+                        metadata_json=table.metadata,
+                    )
+                )
             db.commit()
+            for row in chunk_rows:
+                table_ids = [str(item) for item in (row.metadata_json or {}).get("table_ids") or []]
+                if table_ids:
+                    tables_by_chunk.setdefault(row.id, []).extend(
+                        table_by_id[item] for item in table_ids if item in table_by_id
+                    )
 
             enrichment_results = await self.enricher.enrich(
                 enrichment_profile,
@@ -127,11 +188,23 @@ class IngestionService:
                 row.hypothetical_questions = enrichment.hypothetical_questions
                 row.enrichment_status = enrichment.status
                 row.enrichment_meta = dict(enrichment.meta)
+                if row.id in tables_by_chunk:
+                    table = tables_by_chunk[row.id][0]
+                    row.summary = table.description or enrichment.summary
+                    row.enrichment_meta = {
+                        **dict(row.enrichment_meta or {}),
+                        "table_id": table.id,
+                        "table_description": table.description,
+                    }
             db.commit()
 
             l2_rows = list(chunk_rows)
             granule_rows = await self._build_granularity_rows(
-                enrichment_profile, document, l2_rows, start_index=len(l2_rows)
+                enrichment_profile,
+                document,
+                l2_rows,
+                start_index=len(l2_rows),
+                tables_by_chunk=tables_by_chunk,
             )
             db.add_all(granule_rows)
             db.commit()
@@ -194,6 +267,8 @@ class IngestionService:
                 "enrichment_model": (
                     enrichment_profile.model_name if enrichment_profile else "rules"
                 ),
+                "tables": len(parsed.tables),
+                "pdf_pipeline": pdf_pipeline_meta,
             }
             db.commit()
         except Exception as exc:
@@ -214,6 +289,7 @@ class IngestionService:
             except Exception:
                 logger.warning("failed to clean partial indexes", exc_info=True)
             db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document_id))
+            db.execute(delete(DocumentTable).where(DocumentTable.document_id == document_id))
             document = db.get(Document, document_id)
             job = db.get(IngestionJob, job_id)
             if document:
@@ -415,12 +491,14 @@ class IngestionService:
         l2_rows: list[DocumentChunk],
         *,
         start_index: int,
+        tables_by_chunk: dict[str, list[ParsedTable]] | None = None,
     ) -> list[DocumentChunk]:
         units = build_section_units(l2_rows)
         summaries = await self.enricher.summarize_sections(enrichment_profile, units)
         specs: list[GranuleSpec] = [
             *build_l1_specs(units, summaries),
             *build_l3_specs(l2_rows),
+            *self._table_row_specs(l2_rows, tables_by_chunk or {}),
         ]
         rows: list[DocumentChunk] = []
         for offset, spec in enumerate(specs):
@@ -449,6 +527,56 @@ class IngestionService:
             )
         return rows
 
+    @staticmethod
+    def _table_row_specs(
+        l2_rows: list[DocumentChunk],
+        tables_by_chunk: dict[str, list[ParsedTable]],
+    ) -> list[GranuleSpec]:
+        specs: list[GranuleSpec] = []
+        for row in l2_rows:
+            for table in tables_by_chunk.get(row.id, []):
+                headers = (
+                    table.headers[0]
+                    if table.headers and isinstance(table.headers[0], list)
+                    else table.headers
+                )
+                header_text = " | ".join(str(value).strip() for value in headers if str(value).strip())
+                for row_index, values in enumerate(table.rows[:MAX_L3_PER_L2], 1):
+                    row_values = values if isinstance(values, list) else [values]
+                    content = f"{table.caption or '表格'} | {header_text} | " + " | ".join(
+                        str(value).strip() for value in row_values
+                    )
+                    content = content.strip()
+                    if not content:
+                        continue
+                    specs.append(
+                        GranuleSpec(
+                            content=content,
+                            section_path=row.section_path,
+                            token_count=count_tokens(content),
+                            granularity_level="L3",
+                            granule_type="table_row",
+                            parent_chunk_id=row.id,
+                            metadata={
+                                "granularity_level": "L3",
+                                "parent_chunk_id": row.id,
+                                "parent_chunk_index": row.chunk_index,
+                                "pages": [table.page_start, table.page_end],
+                                "element_type": "table_row",
+                                "selection_reason": "structured_table_row",
+                                "table_ids": [table.id],
+                                "table_row_index": row_index,
+                            },
+                            enrichment_status="ready",
+                            enrichment_meta={
+                                "generated_by": "layout_table",
+                                "granularity_level": "L3",
+                                "table_id": table.id,
+                            },
+                        )
+                    )
+        return specs
+
     def _indexed_chunks(
         self, document: Document, rows: list[DocumentChunk]
     ) -> list[IndexedChunk]:
@@ -469,6 +597,12 @@ class IngestionService:
                     "granule_type": getattr(row, "granule_type", "paragraph"),
                     "parent_chunk_id": getattr(row, "parent_chunk_id", None),
                     "context_prefix": getattr(row, "context_prefix", ""),
+                    "pages": list((row.metadata_json or {}).get("pages") or []),
+                    "bboxes": list((row.metadata_json or {}).get("bboxes") or []),
+                    "block_types": list((row.metadata_json or {}).get("block_types") or []),
+                    "ocr_engines": list((row.metadata_json or {}).get("ocr_engines") or []),
+                    "ocr_confidence": (row.metadata_json or {}).get("ocr_confidence"),
+                    "table_ids": list((row.metadata_json or {}).get("table_ids") or []),
                 },
             )
             for row in rows

@@ -2,6 +2,7 @@ import math
 import re
 from collections.abc import Awaitable, Callable
 
+from app.chunking.layout_chunker import LayoutAwareChunker, should_use_layout_chunker
 from app.chunking.semantic_chunker import ChunkData, SemanticChunker, count_tokens, token_spans
 from app.parsing.base import ParsedDocument, ParsedElement
 
@@ -320,6 +321,11 @@ async def split_document(
         raise ValueError("chunk_size 不能小于 32")
     if chunk_overlap < 0 or chunk_overlap >= chunk_size:
         raise ValueError("chunk_overlap 必须大于等于 0 且小于 chunk_size")
+
+    if should_use_layout_chunker(parsed_document, mode):
+        return LayoutAwareChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap).split(
+            parsed_document
+        )
 
     if mode == "structure":
         chunks = SemanticChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap).split(

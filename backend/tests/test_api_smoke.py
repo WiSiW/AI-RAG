@@ -25,6 +25,23 @@ def test_health_login_and_configuration_flow():
             == 401
         )
         headers = auth_headers(client)
+        engines = client.get("/api/v1/parsing-engines", headers=headers)
+        assert engines.status_code == 200, engines.text
+        assert {item["category"] for item in engines.json()} == {"ocr", "table", "layout"}
+        adapters = client.get("/api/v1/parsing-engines/adapters", headers=headers)
+        assert adapters.status_code == 200
+        assert {item["adapter"] for item in adapters.json() if item["category"] == "ocr"} == {"http_ocr"}
+        invalid_engine = client.post(
+            "/api/v1/parsing-engines",
+            headers=headers,
+            json={
+                "category": "ocr",
+                "adapter": "http_ocr",
+                "display_name": "不安全配置",
+                "config": {"api_key": "should-not-store"},
+            },
+        )
+        assert invalid_engine.status_code == 422
 
         embedding = client.post(
             "/api/v1/model-profiles",

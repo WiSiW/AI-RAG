@@ -88,6 +88,70 @@ export interface Chunk {
   enrichment_meta: Record<string, unknown>;
 }
 
+export interface DocumentTable {
+  id: string;
+  document_id: string;
+  kb_id: string;
+  page_start: number;
+  page_end: number;
+  bbox: number[];
+  layout_block_id: string;
+  caption: string;
+  cells: Array<Record<string, unknown>>;
+  headers: unknown[];
+  rows: unknown[];
+  markdown: string;
+  description: string;
+  description_meta: Record<string, unknown>;
+  extraction_engine: string;
+  quality_score: number;
+  quality_json: Record<string, unknown>;
+  metadata_json: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface TableContext {
+  id: string;
+  caption: string;
+  page_start: number;
+  page_end: number;
+  markdown: string;
+  description: string;
+  extraction_engine: string;
+  quality_score: number;
+  injected_mode: string;
+}
+
+export type ParsingEngineCategory = "ocr" | "table" | "layout";
+
+export interface ParsingEngineAdapter {
+  category: ParsingEngineCategory;
+  adapter: string;
+  label: string;
+  description: string;
+  config_schema: Record<string, unknown>;
+}
+
+export interface ParsingEngine {
+  id: string;
+  category: ParsingEngineCategory;
+  adapter: string;
+  display_name: string;
+  priority: number;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  health: { available?: boolean; detail?: string };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ParsingEngineTestResult {
+  ok: boolean;
+  message: string;
+  latency_ms: number;
+  details: Record<string, unknown>;
+}
+
 export interface QAPair {
   question: string;
   answer: string;
@@ -117,6 +181,12 @@ export interface BatchUploadItem {
   document: DocumentItem | null;
   job: IngestionJob | null;
   error: string | null;
+}
+
+export interface ReparsePdfResponse {
+  queued: number;
+  skipped: number;
+  job_ids: string[];
 }
 
 export interface BatchUploadResponse {
@@ -213,6 +283,7 @@ export interface SearchResult {
   context_prefix: string;
   context_text: string;
   matched_questions: string[];
+  tables?: TableContext[];
   metadata: Record<string, unknown>;
   file_url: string | null;
   preview_url: string | null;

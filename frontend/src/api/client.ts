@@ -10,14 +10,19 @@ import type {
   DocumentContent,
   DocumentDetail,
   DocumentItem,
+  DocumentTable,
   IngestionJob,
   KnowledgeBase,
   KnowledgeBasePackageInspection,
   KnowledgeBaseTransferJob,
   ModelProfile,
   ModelTestResult,
+  ParsingEngine,
+  ParsingEngineAdapter,
+  ParsingEngineTestResult,
   PublishedApi,
   PublishedApiCreated,
+  ReparsePdfResponse,
   SearchResponse,
   TokenResponse,
   UploadResponse,
@@ -151,12 +156,44 @@ export const api = {
 
   getCapabilities: () => request<Capabilities>("/system/capabilities"),
 
+  listParsingEngines: (category?: string) =>
+    request<ParsingEngine[]>(`/parsing-engines${category ? `?category=${category}` : ""}`),
+  listParsingEngineAdapters: () =>
+    request<ParsingEngineAdapter[]>("/parsing-engines/adapters"),
+  createParsingEngine: (payload: Record<string, unknown>) =>
+    request<ParsingEngine>("/parsing-engines", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateParsingEngine: (id: string, payload: Record<string, unknown>) =>
+    request<ParsingEngine>(`/parsing-engines/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteParsingEngine: (id: string) =>
+    request<void>(`/parsing-engines/${id}`, { method: "DELETE" }),
+  reorderParsingEngines: (category: string, engineIds: string[]) =>
+    request<ParsingEngine[]>("/parsing-engines/reorder", {
+      method: "POST",
+      body: JSON.stringify({ category, engine_ids: engineIds }),
+    }),
+  testParsingEngine: (id: string) =>
+    request<ParsingEngineTestResult>(`/parsing-engines/${id}/test`, { method: "POST" }),
+
   listDocuments: (kbId: string) =>
     request<DocumentItem[]>(`/knowledge-bases/${kbId}/documents`),
   getDocument: (id: string) => request<DocumentDetail>(`/documents/${id}`),
   getDocumentContent: (id: string) =>
     request<DocumentContent>(`/documents/${id}/content`),
   listChunks: (id: string) => request<Chunk[]>(`/documents/${id}/chunks`),
+  listDocumentTables: (id: string) =>
+    request<DocumentTable[]>(`/documents/${id}/tables`),
+  getDocumentTable: (documentId: string, tableId: string) =>
+    request<DocumentTable>(`/documents/${documentId}/tables/${tableId}`),
+  reparsePdfDocuments: (kbId: string) =>
+    request<ReparsePdfResponse>(`/knowledge-bases/${kbId}/documents/reparse-pdfs`, {
+      method: "POST",
+    }),
   getChunk: (documentId: string, chunkId: string) =>
     request<Chunk>(`/documents/${documentId}/chunks/${chunkId}`),
   deleteDocument: (id: string) => request<void>(`/documents/${id}`, { method: "DELETE" }),

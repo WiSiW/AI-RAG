@@ -126,6 +126,7 @@ class Document(Base):
         "DocumentChunk", back_populates="document", cascade="all, delete-orphan"
     )
     jobs = relationship("IngestionJob", back_populates="document", cascade="all, delete-orphan")
+    tables = relationship("DocumentTable", back_populates="document", cascade="all, delete-orphan")
 
 
 class DocumentChunk(Base):
@@ -157,6 +158,53 @@ class DocumentChunk(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     document = relationship("Document", back_populates="chunks")
+
+
+class DocumentTable(Base):
+    __tablename__ = "document_tables"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    kb_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    page_start: Mapped[int] = mapped_column(Integer, default=1)
+    page_end: Mapped[int] = mapped_column(Integer, default=1)
+    bbox: Mapped[list] = mapped_column(JSON, default=list)
+    layout_block_id: Mapped[str] = mapped_column(String(120), default="")
+    caption: Mapped[str] = mapped_column(Text, default="")
+    cells: Mapped[list] = mapped_column(JSON, default=list)
+    headers: Mapped[list] = mapped_column(JSON, default=list)
+    rows: Mapped[list] = mapped_column(JSON, default=list)
+    markdown: Mapped[str] = mapped_column(Text, default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    description_meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    extraction_engine: Mapped[str] = mapped_column(String(80), default="")
+    quality_score: Mapped[float] = mapped_column(Float, default=0)
+    quality_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    document = relationship("Document", back_populates="tables")
+
+
+class ParsingEngineConfig(Base):
+    __tablename__ = "parsing_engine_configs"
+    __table_args__ = (UniqueConstraint("category", "display_name", name="uq_parsing_engine_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    category: Mapped[str] = mapped_column(String(20), index=True)
+    adapter: Mapped[str] = mapped_column(String(80))
+    display_name: Mapped[str] = mapped_column(String(120))
+    priority: Mapped[int] = mapped_column(Integer, default=100, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class IngestionJob(Base):

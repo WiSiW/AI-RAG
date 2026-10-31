@@ -15,6 +15,7 @@ from app.db.models import (
     Document,
     DocumentChunk,
     DocumentStatus,
+    DocumentTable,
     KnowledgeBase,
     KnowledgeBaseTransferJob,
     ModelKind,
@@ -37,7 +38,7 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def build_package(path: Path, *, mode: str = "documents") -> None:
+def build_package(path: Path, *, mode: str = "documents", include_table: bool = False) -> None:
     document_id = "old-doc"
     l2_id = "old-l2"
     l3_id = "old-l3"
@@ -67,6 +68,7 @@ def build_package(path: Path, *, mode: str = "documents") -> None:
             "token_count": 512,
             "granularity_level": "L2",
             "granule_type": "paragraph",
+            "metadata_json": {"table_ids": ["old-table"]} if include_table else {},
             "context_prefix": "[文档: 手册 / 章节: 安装]",
             "summary": "安装电源操作。",
             "keywords": ["安装", "电源"],
@@ -95,13 +97,46 @@ def build_package(path: Path, *, mode: str = "documents") -> None:
             "enrichment_status": "ready",
         },
     ]
+    table_records = []
+    if include_table:
+        table_records.append(
+            {
+                "id": "old-table",
+                "document_id": document_id,
+                "kb_id": "old-kb",
+                "page_start": 1,
+                "page_end": 1,
+                "bbox": [0.1, 0.2, 0.9, 0.8],
+                "layout_block_id": "layout-table-1",
+                "caption": "收入表",
+                "cells": [{"row": 0, "col": 0, "rowspan": 1, "colspan": 1, "text": "产品"}],
+                "headers": ["产品", "收入"],
+                "rows": [["产品A", "500"]],
+                "markdown": "| 产品 | 收入 |\n| --- | --- |\n| 产品A | 500 |",
+                "description": "产品A收入为500万美元。",
+                "description_meta": {"generated_by": "rules"},
+                "extraction_engine": "pdfplumber",
+                "quality_score": 0.9,
+                "quality_json": {"rows": 1},
+                "metadata_json": {},
+            }
+        )
     payloads = {
         "documents.jsonl": "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in documents).encode(),
         "chunks.jsonl": "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in chunks).encode(),
         f"originals/{document_id}/manual.md": b"manual data",
+        **(
+            {
+                "tables.jsonl": "".join(
+                    json.dumps(item, ensure_ascii=False) + "\n" for item in table_records
+                ).encode()
+            }
+            if include_table
+            else {}
+        ),
     }
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2 if include_table else 1,
         "package_id": str(uuid.uuid4()),
         "created_at": "2026-10-29T00:00:00+00:00",
         "app_version": "test",
@@ -121,7 +156,7 @@ def build_package(path: Path, *, mode: str = "documents") -> None:
                 }
             },
         },
-        "counts": {"documents": 1, "chunks": 2},
+        "counts": {"documents": 1, "chunks": 2, **({"tables": 1} if include_table else {})},
         "index": {"version": "v2" if mode == "full" else None, "dimensions": 3},
         "file_hashes": {name: _sha(data) for name, data in payloads.items()},
     }
@@ -198,7 +233,7 @@ async def test_package_import_remaps_ids_and_relations(
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
     package = temp_dir / "package.zip"
-    build_package(package, mode=mode)
+    build_package(package, mode=mode, include_table=True)
     try:
         embedding = ModelProfile(
             id="target-embedding",
@@ -268,7 +303,7 @@ async def test_package_import_remaps_ids_and_relations(
         await service.import_knowledge_base(db, job.id)
         db.refresh(job)
 
-        assert job.status == TransferStatus.COMPLETED
+        assert job.status == TransferStatus.COMPLETED, job.errors
         assert calls == (["rebuild"] if index_policy == "rebuild" else ["strict"])
         imported = db.get(KnowledgeBase, job.result_knowledge_base_id)
         assert imported is not None
@@ -279,12 +314,17 @@ async def test_package_import_remaps_ids_and_relations(
         assert documents[0].id != "old-doc"
         assert documents[0].status == DocumentStatus.READY
         assert len(chunks) == 2
+        tables = list(db.scalars(select(DocumentTable).where(DocumentTable.kb_id == imported.id)))
+        assert len(tables) == 1
+        assert tables[0].caption == "收入表"
+        assert tables[0].id != "old-table"
         l3 = next(chunk for chunk in chunks if chunk.granularity_level == "L3")
         l2 = next(chunk for chunk in chunks if chunk.granularity_level == "L2")
         assert l3.parent_chunk_id == l2.id
         assert l3.metadata_json["parent_chunk_id"] == l2.id
         assert {chunk.id for chunk in chunks}.isdisjoint({"old-l2", "old-l3"})
         assert l2.qa_pairs[0]["question"] == "安装前需要关闭什么？"
+        assert l2.metadata_json["table_ids"] == [tables[0].id]
     finally:
         db.close()
         engine.dispose()

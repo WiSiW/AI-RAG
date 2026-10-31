@@ -20,3 +20,8 @@ openai==2.54.0
 python-jose[cryptography]==3.5.0
 cryptography==46.0.7
 python-multipart==0.0.32
+pdfplumber==0.11.7
+camelot-py[cv]==1.0.9
+tabula-py==2.10.0
+Pillow==11.1.0
+numpy==1.26.4

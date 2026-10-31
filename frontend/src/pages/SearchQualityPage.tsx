@@ -167,6 +167,17 @@ export default function SearchQualityPage() {
                         <span key={route} className="chip bg-emerald-50 text-[11px] text-emerald-700">{routeLabels[route] ?? route}</span>
                       ))}
                     </div>
+                    {!!item.tables?.length && (
+                      <div className="mt-2 space-y-2 rounded-lg bg-amber-50 px-2.5 py-2 text-[11px] text-amber-900">
+                        <div className="font-medium">关联表格上下文</div>
+                        {item.tables.map((table) => (
+                          <details key={table.id} className="rounded-md bg-white/70 p-2">
+                            <summary className="cursor-pointer font-medium">{table.caption || "未命名表格"} · {table.injected_mode === "full" ? "完整注入" : "摘要注入"}</summary>
+                            <div className="mt-1 whitespace-pre-wrap font-mono text-[10px] leading-5 text-amber-800">{table.injected_mode === "full" ? table.markdown : table.description}</div>
+                          </details>
+                        ))}
+                      </div>
+                    )}
                     {!!item.matched_questions?.length && (
                       <div className="mt-2 space-y-1 rounded-lg bg-sky-50 px-2.5 py-2 text-[11px] text-sky-800">
                         <div className="font-medium">命中的生成问题</div>
