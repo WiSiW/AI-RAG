@@ -6,7 +6,7 @@ import jieba
 from whoosh import index
 from whoosh.analysis import Token, Tokenizer
 from whoosh.fields import ID, STORED, TEXT, Schema
-from whoosh.qparser import MultifieldParser
+from whoosh.qparser import MultifieldParser, OrGroup
 from whoosh.query import Or, Term
 
 from app.indexing.types import IndexedChunk, RetrievedChunk
@@ -126,17 +126,16 @@ class BM25Store:
         results: list[RetrievedChunk] = []
         search_fields = ["content"]
         field_boosts = {"content": 1.0}
-        if "section" in ix.schema:
-            search_fields.append("section")
-            field_boosts["section"] = 0.8
-        if "keywords" in ix.schema:
-            search_fields.append("keywords")
-            field_boosts["keywords"] = 1.5
+        for field_name, boost in (("section", 0.8), ("keywords", 1.5)):
+            if field_name in ix.schema and getattr(ix.schema[field_name], "indexed", False):
+                search_fields.append(field_name)
+                field_boosts[field_name] = boost
         with ix.searcher() as searcher:
             parser = MultifieldParser(
                 search_fields,
                 schema=ix.schema,
                 fieldboosts=field_boosts,
+                group=OrGroup,
             )
             try:
                 parsed_query = parser.parse(query)

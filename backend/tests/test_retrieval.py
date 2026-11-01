@@ -75,6 +75,36 @@ def test_bm25_multiword_chinese_query_returns_hits():
         assert results[0].metadata["bm25_score"] > 0
 
 
+def test_bm25_multiword_query_uses_or_semantics():
+    with TemporaryDirectory(dir=Path(__file__).parent) as temp_dir:
+        store = BM25Store(temp_dir)
+        store.add_chunks(
+            "kb-or",
+            [
+                IndexedChunk(
+                    chunk_id="c1",
+                    document_id="d1",
+                    kb_id="kb-or",
+                    content="alpha only",
+                    section="正文",
+                    metadata={"source": "demo.md"},
+                ),
+                IndexedChunk(
+                    chunk_id="c2",
+                    document_id="d2",
+                    kb_id="kb-or",
+                    content="beta only",
+                    section="正文",
+                    metadata={"source": "demo.md"},
+                ),
+            ],
+        )
+
+        results = store.search("kb-or", "alpha beta", 10)
+
+        assert {item.chunk_id for item in results} == {"c1", "c2"}
+
+
 def test_bm25_search_supports_legacy_index_with_stored_section():
     with TemporaryDirectory(dir=Path(__file__).parent) as temp_dir:
         index_dir = Path(temp_dir) / "kb"
@@ -99,9 +129,14 @@ def test_bm25_search_supports_legacy_index_with_stored_section():
         )
         writer.commit()
 
-        results = BM25Store(temp_dir).search("kb", "糖尿病 血糖", 10)
+        store = BM25Store(temp_dir)
+        results = store.search("kb", "糖尿病 血糖", 10)
+        single_term_results = store.search("kb", "糖尿病", 10)
+        no_match_results = store.search("kb", "完全不存在", 10)
 
         assert [item.chunk_id for item in results] == ["c1"]
+        assert [item.chunk_id for item in single_term_results] == ["c1"]
+        assert no_match_results == []
 
 
 def test_bm25_v2_retrieves_keyword_only_match():
