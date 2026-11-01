@@ -10,13 +10,24 @@
 ![](./img/upload.png)
 ### 智能问答
 ![](./img/QA.png)
+
+### 历史问答
+
+![](./img/QA-history.png)
+
 ### 模型配置
+
 ![](./img/model.png)
 ![](./img/model-detail.png)
+
 ### 检索质量
 ![](./img/search.png)
 ### API发布
 ![](./img/API.png)
+
+### 分块评估
+
+![](./img/chunk-evaluate.png)
 
 ## 已实现能力
 
