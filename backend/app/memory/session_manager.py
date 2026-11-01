@@ -110,6 +110,11 @@ class ConversationMemory:
             )
         )
 
+    @staticmethod
+    def _is_stopped_assistant(message: Message) -> bool:
+        usage = message.usage if isinstance(message.usage, dict) else {}
+        return message.role == "assistant" and bool(usage.get("stopped"))
+
     def history_text(self, db: Session, conversation: Conversation) -> str:
         cache_key = self._cache_key(conversation.id)
         if self.redis is not None:
@@ -128,6 +133,8 @@ class ConversationMemory:
         if conversation.summary:
             lines.append(f"【较早对话摘要】\n{conversation.summary}")
         for message in recent:
+            if self._is_stopped_assistant(message):
+                continue
             role = "用户" if message.role == "user" else "助手"
             lines.append(f"{role}：{message.content}")
         text = "\n".join(lines)
@@ -189,7 +196,13 @@ class ConversationMemory:
             return
         messages = self.messages(db, conversation.id)
         to_summarize = messages[conversation.summary_message_count : cutoff]
+        to_summarize = [
+            message for message in to_summarize if not self._is_stopped_assistant(message)
+        ]
         if not to_summarize:
+            conversation.summary_message_count = cutoff
+            db.commit()
+            self.invalidate(conversation.id)
             return
         new_text = "\n".join(
             f"{'用户' if message.role == 'user' else '助手'}：{message.content}"

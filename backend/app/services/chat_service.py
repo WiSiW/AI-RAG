@@ -40,6 +40,8 @@ from app.retrieval.multihop_planner import MultiHopPlanner
 from app.schemas import (
     ChatRequest,
     ChatResponse,
+    ChatStageEvent,
+    ChatStageValue,
     Citation,
     ComplexityDecision,
     MultiHopStep,
@@ -1246,59 +1248,97 @@ class ChatService:
         effective_document_id = request.document_id or conversation.document_id
         self._validate_document(db, knowledge_bases, effective_document_id)
         history = self.memory.history_text(db, conversation)
-        rewritten_query = await self._rewrite_query(
-            query=request.query,
-            history=history,
-            llm_profile=llm_profile,
-            scope="、".join(knowledge_base.name for knowledge_base in knowledge_bases),
-        )
-        outcome = await self._retrieve(
-            db,
-            knowledge_bases,
-            rewritten_query,
-            rerank_profile_id=request.rerank_profile_id,
-            document_id=effective_document_id,
-            expand_context=True,
-            retrieval_mode=request.retrieval_mode,
-        )
-        chunks = outcome.chunks
-        if outcome.trace:
-            yield sse_event(
-                "retrieval_plan",
-                outcome.trace.complexity.model_dump() if outcome.trace.complexity else {},
+        stage: ChatStageValue = "retrieving"
+        rewritten_query = request.query
+        outcome: RetrievalOutcome | None = None
+        chunks: list[RetrievedChunk] = []
+        answer_parts: list[str] = []
+        exchange_saved = False
+
+        def exchange_payload() -> tuple[str, list[Citation], dict]:
+            answer = "".join(answer_parts)
+            citations = self._attach_citation_urls(
+                parse_citations(answer, chunks), citation_url_builder
             )
-            for step in outcome.trace.steps:
-                yield sse_event("retrieval_step", step.model_dump())
+            usage = self._usage(answer, chunks, llm_profile)
+            if outcome is not None:
+                usage["failed_knowledge_base_ids"] = outcome.failed_knowledge_base_ids
+                if outcome.trace:
+                    usage["retrieval_trace"] = outcome.trace.model_dump()
+            return answer, citations, usage
+
+        try:
             yield sse_event(
-                "retrieval_done",
+                "stage",
+                ChatStageEvent(
+                    stage="retrieving",
+                    conversation_id=conversation.id,
+                ).model_dump(),
+            )
+            rewritten_query = await self._rewrite_query(
+                query=request.query,
+                history=history,
+                llm_profile=llm_profile,
+                scope="、".join(knowledge_base.name for knowledge_base in knowledge_bases),
+            )
+            outcome = await self._retrieve(
+                db,
+                knowledge_bases,
+                rewritten_query,
+                rerank_profile_id=request.rerank_profile_id,
+                document_id=effective_document_id,
+                expand_context=True,
+                retrieval_mode=request.retrieval_mode,
+            )
+            chunks = outcome.chunks
+            if outcome.trace:
+                yield sse_event(
+                    "retrieval_plan",
+                    outcome.trace.complexity.model_dump() if outcome.trace.complexity else {},
+                )
+                for step in outcome.trace.steps:
+                    yield sse_event("retrieval_step", step.model_dump())
+                yield sse_event(
+                    "retrieval_done",
+                    {
+                        "stop_reason": outcome.trace.stop_reason,
+                        "uncertain": outcome.trace.uncertain,
+                        "total_rounds": outcome.trace.total_rounds,
+                        "total_chunks": outcome.trace.total_chunks,
+                        "uncertainty_notice": outcome.trace.uncertainty_notice,
+                    },
+                )
+            stage = "generating"
+            yield sse_event(
+                "stage",
+                ChatStageEvent(
+                    stage="generating",
+                    conversation_id=conversation.id,
+                    context_count=len(chunks),
+                ).model_dump(),
+            )
+            yield sse_event(
+                "start",
                 {
-                    "stop_reason": outcome.trace.stop_reason,
-                    "uncertain": outcome.trace.uncertain,
-                    "total_rounds": outcome.trace.total_rounds,
-                    "total_chunks": outcome.trace.total_chunks,
-                    "uncertainty_notice": outcome.trace.uncertainty_notice,
+                    "conversation_id": conversation.id,
+                    "document_id": conversation.document_id,
+                    "knowledge_base_ids": request.knowledge_base_ids,
+                    "knowledge_bases": [
+                        {"id": knowledge_base.id, "name": knowledge_base.name}
+                        for knowledge_base in knowledge_bases
+                    ],
+                    "rewritten_query": rewritten_query,
+                    "context_count": len(chunks),
+                    "failed_knowledge_base_ids": outcome.failed_knowledge_base_ids,
+                    "retrieval_mode": request.retrieval_mode,
+                    "multi_hop": bool(
+                        outcome.trace
+                        and outcome.trace.complexity
+                        and outcome.trace.complexity.is_multi_hop
+                    ),
+                    "uncertain": bool(outcome.trace and outcome.trace.uncertain),
                 },
             )
-        yield sse_event(
-            "start",
-            {
-                "conversation_id": conversation.id,
-                "document_id": conversation.document_id,
-                "knowledge_base_ids": request.knowledge_base_ids,
-                "knowledge_bases": [
-                    {"id": knowledge_base.id, "name": knowledge_base.name}
-                    for knowledge_base in knowledge_bases
-                ],
-                "rewritten_query": rewritten_query,
-                "context_count": len(chunks),
-                "failed_knowledge_base_ids": outcome.failed_knowledge_base_ids,
-                "retrieval_mode": request.retrieval_mode,
-                "multi_hop": bool(outcome.trace and outcome.trace.complexity and outcome.trace.complexity.is_multi_hop),
-                "uncertain": bool(outcome.trace and outcome.trace.uncertain),
-            },
-        )
-        answer_parts: list[str] = []
-        try:
             if chunks:
                 prompt = build_chat_prompt(request.query, chunks, history)
                 async for token in self.gateway.stream(
@@ -1323,14 +1363,7 @@ class ChatService:
                 notice_chunk = f"\n\n{uncertainty_notice}"
                 answer_parts.append(notice_chunk)
                 yield sse_event("token", {"content": notice_chunk})
-            answer = "".join(answer_parts)
-            citations = self._attach_citation_urls(
-                parse_citations(answer, chunks), citation_url_builder
-            )
-            usage = self._usage(answer, chunks, llm_profile)
-            usage["failed_knowledge_base_ids"] = outcome.failed_knowledge_base_ids
-            if outcome.trace:
-                usage["retrieval_trace"] = outcome.trace.model_dump()
+            answer, citations, usage = exchange_payload()
             message = self.memory.add_exchange(
                 db,
                 conversation,
@@ -1341,6 +1374,7 @@ class ChatService:
                 context=self._context_payload(chunks),
                 usage=usage,
             )
+            exchange_saved = True
             yield sse_event(
                 "citations",
                 {"citations": [citation.model_dump() for citation in citations]},
@@ -1357,7 +1391,25 @@ class ChatService:
             asyncio.create_task(
                 summarize_background(conversation.id, llm_profile.id, self.memory)
             )
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
+            if not exchange_saved:
+                try:
+                    answer, citations, usage = exchange_payload()
+                    usage["stopped"] = True
+                    usage["stopped_stage"] = stage
+                    self.memory.add_exchange(
+                        db,
+                        conversation,
+                        question=request.query,
+                        answer=answer,
+                        rewritten_query=rewritten_query,
+                        citations=citations,
+                        context=self._context_payload(chunks),
+                        usage=usage,
+                    )
+                except Exception:
+                    db.rollback()
+                    logger.exception("failed to persist stopped chat")
             raise
         except Exception as exc:
             logger.exception("streaming chat failed")

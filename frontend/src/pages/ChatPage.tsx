@@ -9,7 +9,7 @@ import CitationList from "../components/CitationList";
 import KnowledgeBaseSelector from "../components/KnowledgeBaseSelector";
 import RetrievalTracePanel from "../components/RetrievalTracePanel";
 import { ErrorState, LoadingState, PageHeader } from "../components/UI";
-import type { Citation, ComplexityDecision, MultiHopStep, RetrievalTrace } from "../types";
+import type { ChatStage, ChatStageEvent, Citation, ComplexityDecision, MultiHopStep, RetrievalTrace } from "../types";
 
 interface ChatMessageView {
   id: string;
@@ -18,8 +18,15 @@ interface ChatMessageView {
   citations: Citation[];
   messageId?: string;
   streaming?: boolean;
+  phase?: ChatStage;
+  stopped?: boolean;
+  stoppedStage?: ChatStage;
   retrievalTrace?: RetrievalTrace;
   uncertaintyNotice?: string;
+}
+
+function parseChatStage(value: unknown): ChatStage | undefined {
+  return value === "retrieving" || value === "generating" ? value : undefined;
 }
 
 const prompts = [
@@ -57,10 +64,14 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessageView[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
   const [feedback, setFeedback] = useState<Record<string, 1 | -1>>({});
   const abortRef = useRef<AbortController | null>(null);
+  const stopRequestedRef = useRef(false);
+  const runVersionRef = useRef(0);
+  const preserveLocalConversationRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const scopeInitializedRef = useRef(false);
 
@@ -99,26 +110,44 @@ export default function ChatPage() {
   useEffect(() => {
     if (!conversationQuery.data) return;
     const conversation = conversationQuery.data;
+    if (preserveLocalConversationRef.current === conversation.id) {
+      preserveLocalConversationRef.current = null;
+      return;
+    }
     setConversationId(conversation.id);
     setKbIds(conversation.knowledge_base_ids);
     setDocumentId(conversation.document_id || "");
     setLlmId(conversation.llm_profile_id || "");
     setMessages(
-      conversation.messages.map((message) => ({
-        id: message.id,
-        role: message.role,
-        content: message.content,
-        citations: message.citations,
-        messageId: message.role === "assistant" ? message.id : undefined,
-        retrievalTrace: (message.usage?.retrieval_trace as RetrievalTrace | undefined) ?? undefined,
-        uncertaintyNotice: (message.usage?.retrieval_trace as RetrievalTrace | undefined)?.uncertainty_notice ?? "",
-      })),
+      conversation.messages.map((message) => {
+        const usage = message.usage ?? {};
+        const stoppedStage = parseChatStage(usage.stopped_stage);
+        return {
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          citations: message.citations,
+          messageId: message.role === "assistant" ? message.id : undefined,
+          stopped: message.role === "assistant" && usage.stopped === true,
+          stoppedStage,
+          retrievalTrace: (usage.retrieval_trace as RetrievalTrace | undefined) ?? undefined,
+          uncertaintyNotice: (usage.retrieval_trace as RetrievalTrace | undefined)?.uncertainty_notice ?? "",
+        };
+      }),
     );
   }, [conversationQuery.data]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
+
+  useEffect(
+    () => () => {
+      runVersionRef.current += 1;
+      abortRef.current?.abort();
+    },
+    [],
+  );
 
   const feedbackMutation = useMutation({
     mutationFn: ({ messageId, rating }: { messageId: string; rating: 1 | -1 }) =>
@@ -131,18 +160,38 @@ export default function ChatPage() {
     event?.preventDefault();
     const query = input.trim();
     if (!query || !kbIds.length || !llmId || streaming) return;
+    const runVersion = runVersionRef.current + 1;
+    runVersionRef.current = runVersion;
+    stopRequestedRef.current = false;
+    const isCurrentRun = () => runVersionRef.current === runVersion;
     setError("");
     setWarning("");
     setInput("");
     const userView: ChatMessageView = { id: `user-${Date.now()}`, role: "user", content: query, citations: [] };
-    const assistantView: ChatMessageView = { id: `assistant-${Date.now()}`, role: "assistant", content: "", citations: [], streaming: true };
+    const assistantView: ChatMessageView = {
+      id: `assistant-${Date.now()}`,
+      role: "assistant",
+      content: "",
+      citations: [],
+      streaming: true,
+      phase: "retrieving",
+    };
     let currentTrace: RetrievalTrace | undefined;
+    let currentStage: ChatStage = "retrieving";
+    let completed = false;
+    let failed = false;
     setMessages((current) => [...current, userView, assistantView]);
     setStreaming(true);
+    setStopping(false);
     const controller = new AbortController();
     abortRef.current = controller;
     let answer = "";
     let activeConversationId = conversationId;
+    const updateAssistant = (patch: Partial<ChatMessageView>) => {
+      setMessages((current) =>
+        current.map((message) => message.id === assistantView.id ? { ...message, ...patch } : message),
+      );
+    };
 
     try {
       await streamChat(
@@ -157,12 +206,26 @@ export default function ChatPage() {
         },
         {
           onEvent: (eventName, data) => {
-            if (eventName === "start") {
+            if (!isCurrentRun() || stopRequestedRef.current) return;
+            if (eventName === "stage") {
+              const stageData = data as unknown as ChatStageEvent;
+              const nextStage = parseChatStage(stageData.stage);
+              if (!nextStage) return;
+              currentStage = nextStage;
+              const startedConversationId = stageData.conversation_id;
+              if (startedConversationId) {
+                activeConversationId = startedConversationId;
+                setConversationId(startedConversationId);
+              }
+              updateAssistant({ phase: nextStage });
+            } else if (eventName === "start") {
+              currentStage = "generating";
               const startedConversationId = String(data.conversation_id ?? "");
               if (startedConversationId) {
                 activeConversationId = startedConversationId;
                 setConversationId(startedConversationId);
               }
+              updateAssistant({ phase: "generating" });
               const failedIds = (data.failed_knowledge_base_ids ?? []) as string[];
               if (failedIds.length) {
                 const failedNames = failedIds.map(
@@ -182,11 +245,11 @@ export default function ChatPage() {
                 total_rounds: 0,
                 total_chunks: 0,
               };
-              setMessages((current) => current.map((message) => message.id === assistantView.id ? { ...message, retrievalTrace: currentTrace } : message));
+              updateAssistant({ retrievalTrace: currentTrace });
             } else if (eventName === "retrieval_step") {
               if (!currentTrace) return;
               currentTrace = { ...currentTrace, steps: [...currentTrace.steps, data as unknown as MultiHopStep] };
-              setMessages((current) => current.map((message) => message.id === assistantView.id ? { ...message, retrievalTrace: currentTrace } : message));
+              updateAssistant({ retrievalTrace: currentTrace });
             } else if (eventName === "retrieval_done") {
               if (!currentTrace) return;
               currentTrace = {
@@ -197,33 +260,31 @@ export default function ChatPage() {
                 total_rounds: Number(data.total_rounds ?? currentTrace.steps.length),
                 total_chunks: Number(data.total_chunks ?? 0),
               };
-              setMessages((current) => current.map((message) => message.id === assistantView.id ? { ...message, retrievalTrace: currentTrace, uncertaintyNotice: currentTrace?.uncertainty_notice } : message));
+              updateAssistant({
+                retrievalTrace: currentTrace,
+                uncertaintyNotice: currentTrace.uncertainty_notice,
+              });
             } else if (eventName === "notice") {
               const notice = String(data.message ?? "");
-              setMessages((current) => current.map((message) => message.id === assistantView.id ? { ...message, uncertaintyNotice: notice } : message));
+              updateAssistant({ uncertaintyNotice: notice });
             } else if (eventName === "token") {
+              currentStage = "generating";
               answer += String(data.content ?? "");
-              setMessages((current) =>
-                current.map((message) =>
-                  message.id === assistantView.id ? { ...message, content: answer } : message,
-                ),
-              );
+              updateAssistant({ content: answer, phase: "generating" });
             } else if (eventName === "citations") {
               const citations = (data.citations ?? []) as Citation[];
-              setMessages((current) =>
-                current.map((message) =>
-                  message.id === assistantView.id ? { ...message, citations } : message,
-                ),
-              );
+              updateAssistant({ citations });
             } else if (eventName === "done") {
+              completed = true;
               const messageId = String(data.message_id ?? "");
-              setMessages((current) =>
-                current.map((message) =>
-                  message.id === assistantView.id
-                    ? { ...message, messageId, streaming: false, retrievalTrace: currentTrace ?? message.retrievalTrace }
-                    : message,
-                ),
-              );
+              updateAssistant({
+                messageId,
+                streaming: false,
+                phase: undefined,
+                stopped: false,
+                stoppedStage: undefined,
+                retrievalTrace: currentTrace,
+              });
               void queryClient.invalidateQueries({ queryKey: ["conversations"] });
               if (activeConversationId) {
                 const documentQuery = documentId ? `&document=${documentId}` : "";
@@ -231,35 +292,68 @@ export default function ChatPage() {
                 void queryClient.invalidateQueries({ queryKey: ["conversation", activeConversationId] });
               }
             } else if (eventName === "error") {
+              failed = true;
               setError(String(data.message ?? "生成回答失败"));
-              setMessages((current) =>
-                current.map((message) =>
-                  message.id === assistantView.id ? { ...message, streaming: false } : message,
-                ),
-              );
+              updateAssistant({ streaming: false, phase: undefined });
             }
           },
-          onError: (streamError) => setError(streamError.message),
+          onError: (streamError) => {
+            if (isCurrentRun() && !stopRequestedRef.current) setError(streamError.message);
+          },
         },
         controller.signal,
       );
+      if (isCurrentRun() && !completed && !failed && !stopRequestedRef.current) {
+        throw new Error("问答连接意外中断，请重试。");
+      }
     } catch (streamError) {
-      if ((streamError as Error).name !== "AbortError") {
+      if (!isCurrentRun()) return;
+      if (!stopRequestedRef.current && (streamError as Error).name !== "AbortError") {
         setError((streamError as Error).message);
       }
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === assistantView.id ? { ...message, streaming: false } : message,
-        ),
-      );
+      if (!stopRequestedRef.current) {
+        updateAssistant({ streaming: false, phase: undefined });
+      }
     } finally {
+      if (!isCurrentRun()) return;
+      const stoppedByUser = stopRequestedRef.current && !completed && !failed;
+      if (stoppedByUser) {
+        updateAssistant({
+          streaming: false,
+          phase: undefined,
+          stopped: true,
+          stoppedStage: currentStage,
+        });
+        void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+        if (activeConversationId) {
+          preserveLocalConversationRef.current = activeConversationId;
+          const documentQuery = documentId ? `&document=${documentId}` : "";
+          navigate(`/chat?kbs=${kbIds.join(",")}${documentQuery}&conversation=${activeConversationId}`, { replace: true });
+          void queryClient.invalidateQueries({ queryKey: ["conversation", activeConversationId] });
+        }
+      }
       setStreaming(false);
+      setStopping(false);
+      stopRequestedRef.current = false;
       abortRef.current = null;
     }
   }
 
+  function stopCurrentChat() {
+    if (!abortRef.current || stopRequestedRef.current) return;
+    setError("");
+    stopRequestedRef.current = true;
+    setStopping(true);
+    abortRef.current.abort();
+  }
+
   function newConversation() {
+    runVersionRef.current += 1;
+    stopRequestedRef.current = false;
     abortRef.current?.abort();
+    abortRef.current = null;
+    setStreaming(false);
+    setStopping(false);
     setConversationId("");
     setMessages([]);
     setInput("");
@@ -270,7 +364,12 @@ export default function ChatPage() {
   }
 
   function changeKnowledgeBases(nextIds: string[]) {
+    runVersionRef.current += 1;
+    stopRequestedRef.current = false;
     abortRef.current?.abort();
+    abortRef.current = null;
+    setStreaming(false);
+    setStopping(false);
     setKbIds(nextIds);
     setDocumentId("");
     setConversationId("");
@@ -367,11 +466,27 @@ export default function ChatPage() {
                       <div className={`min-w-0 ${message.role === "user" ? "max-w-[85%]" : "max-w-[92%] flex-1"}`}>
                         <div className={message.role === "user" ? "rounded-2xl rounded-tr-md bg-ink-900 px-4 py-3 text-sm leading-6 text-white" : "rounded-2xl rounded-tl-md border border-slate-200 bg-white px-4 py-4"}>
                           {message.role === "assistant" ? (
-                            message.content ? (
-                              <article className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></article>
-                            ) : (
-                              <div className="flex items-center gap-2 text-sm text-slate-400"><LoaderCircle className="h-4 w-4 animate-spin" />正在检索与生成...</div>
-                            )
+                            <>
+                              {message.streaming && (
+                                <div role="status" aria-live="polite" className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-500">
+                                  <LoaderCircle className="h-3.5 w-3.5 animate-spin text-brand-600" />
+                                  {stopping ? "正在停止" : message.phase === "generating" ? "正在生成" : "正在检索"}
+                                </div>
+                              )}
+                              {message.content && (
+                                <article className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></article>
+                              )}
+                              {!message.streaming && message.stopped && (
+                                <div className="flex items-center gap-1.5 text-xs text-slate-500">
+                                  <CircleStop className="h-3.5 w-3.5" />
+                                  {message.stoppedStage === "retrieving"
+                                    ? "已停止（检索阶段）"
+                                    : message.stoppedStage === "generating"
+                                      ? "已停止（生成阶段）"
+                                      : "已停止"}
+                                </div>
+                              )}
+                            </>
                           ) : (
                             <div className="whitespace-pre-wrap">{message.content}</div>
                           )}
@@ -380,7 +495,7 @@ export default function ChatPage() {
                           {message.role === "assistant" && message.uncertaintyNotice && !message.content.includes(message.uncertaintyNotice) && <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{message.uncertaintyNotice}</div>}
                           {message.role === "assistant" && <CitationList citations={message.citations} />}
                         </div>
-                        {message.role === "assistant" && message.messageId && (
+                        {message.role === "assistant" && message.messageId && !message.stopped && (
                           <div className="mt-2 flex items-center gap-1 pl-1 text-slate-400">
                             <button type="button" onClick={() => feedbackMutation.mutate({ messageId: message.messageId!, rating: 1 })} className={`rounded-lg p-1.5 hover:bg-slate-100 ${feedback[message.messageId] === 1 ? "text-emerald-600" : ""}`} aria-label="回答有帮助"><ThumbsUp className="h-3.5 w-3.5" /></button>
                             <button type="button" onClick={() => feedbackMutation.mutate({ messageId: message.messageId!, rating: -1 })} className={`rounded-lg p-1.5 hover:bg-slate-100 ${feedback[message.messageId] === -1 ? "text-red-600" : ""}`} aria-label="回答待改进"><ThumbsDown className="h-3.5 w-3.5" /></button>
@@ -413,7 +528,7 @@ export default function ChatPage() {
                   disabled={streaming}
                 />
                 {streaming ? (
-                  <button type="button" onClick={() => abortRef.current?.abort()} className="grid h-11 w-11 place-items-center rounded-xl bg-slate-200 text-slate-600" aria-label="停止生成"><CircleStop className="h-5 w-5" /></button>
+                  <button type="button" onClick={stopCurrentChat} disabled={stopping} className="flex h-11 items-center gap-1.5 rounded-xl bg-slate-200 px-3 text-xs font-medium text-slate-700 transition hover:bg-slate-300 disabled:cursor-wait disabled:opacity-70" aria-label="停止当前问答"><CircleStop className="h-4 w-4" />{stopping ? "正在停止" : "停止"}</button>
                 ) : (
                   <button type="submit" disabled={!input.trim() || !kbIds.length || !llmId} className="grid h-11 w-11 place-items-center rounded-xl bg-brand-600 text-white shadow-sm hover:bg-brand-700 disabled:opacity-40" aria-label="发送"><Send className="h-5 w-5" /></button>
                 )}

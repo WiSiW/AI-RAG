@@ -241,6 +241,14 @@ export interface ConversationDetail extends Conversation {
   messages: Message[];
 }
 
+export type ChatStage = "retrieving" | "generating";
+
+export interface ChatStageEvent {
+  stage: ChatStage;
+  conversation_id: string;
+  context_count: number;
+}
+
 export interface ChatResponse {
   conversation_id: string;
   message_id: string;

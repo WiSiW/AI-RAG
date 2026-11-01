@@ -226,11 +226,8 @@ Chat 和 Search 响应还返回 `retrieval_trace`，包含复杂度判定、每�
 `POST /chat` 且 `stream=true` 返回 `text/event-stream`：
 
 ```text
-event: start
-data: {"conversation_id":"...","knowledge_base_ids":["kb-1","kb-2"],"rewritten_query":"...","context_count":5}
-
-event: token
-data: {"content":"回答片段"}
+event: stage
+data: {"stage":"retrieving","conversation_id":"...","context_count":0}
 
 event: retrieval_plan
 data: {"is_multi_hop":true,"decision_source":"bert","rule_score":0.4,"bert_probability":0.87}
@@ -240,6 +237,15 @@ data: {"round":1,"query":"...","new_chunk_count":8,"key_entities":["..."],"need_
 
 event: retrieval_done
 data: {"stop_reason":"planner_sufficient","uncertain":false,"total_rounds":2,"total_chunks":13}
+
+event: stage
+data: {"stage":"generating","conversation_id":"...","context_count":5}
+
+event: start
+data: {"conversation_id":"...","knowledge_base_ids":["kb-1","kb-2"],"rewritten_query":"...","context_count":5}
+
+event: token
+data: {"content":"回答片段"}
 
 event: citations
 data: {"citations":[{"index":1,"knowledge_base_id":"kb-1","knowledge_base_name":"制度库","source":"制度.pdf","section":"第一章 > 1.1"}]}
@@ -254,6 +260,8 @@ data: {"conversation_id":"...","message_id":"...","usage":{...}}
 event: error
 data: {"message":"错误详情"}
 ```
+
+首个 `stage` 事件在查询改写和检索开始前发送，用于确认会话已经创建并提示当前处于检索阶段；检索结束后、首个回答 token 前发送 `stage=generating`。客户端可通过关闭 SSE 连接停止当前问答。服务端会取消后续检索轮次和模型流，并将已得到的部分回答持久化，助手消息的 `usage` 中会包含 `stopped=true` 和 `stopped_stage=retrieving|generating`。已停止的助手回答仍会出现在会话历史中，但不会进入后续对话的模型上下文或会话摘要；用户问题仍保留。
 
 ## 健康检查
 

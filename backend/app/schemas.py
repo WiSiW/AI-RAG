@@ -22,6 +22,7 @@ ChunkTuningStageValue = Literal["screening", "verification"]
 KnowledgeBaseExportMode = Literal["documents", "full"]
 KnowledgeBaseIndexPolicy = Literal["strict", "rebuild"]
 RetrievalModeValue = Literal["auto", "single", "multi"]
+ChatStageValue = Literal["retrieving", "generating"]
 ParsingEngineCategory = Literal["ocr", "table", "layout"]
 
 
@@ -812,6 +813,12 @@ class SearchResponse(BaseModel):
     results: list[SearchResult]
     quality: SearchQualitySummary = Field(default_factory=SearchQualitySummary)
     retrieval_trace: RetrievalTrace | None = None
+
+
+class ChatStageEvent(BaseModel):
+    stage: ChatStageValue
+    conversation_id: str
+    context_count: int = 0
 
 
 class ChatRequest(BaseModel):
