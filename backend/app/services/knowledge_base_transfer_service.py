@@ -40,7 +40,7 @@ from app.services.ingestion_service import IngestionService
 
 logger = logging.getLogger(__name__)
 
-PACKAGE_SCHEMA_VERSION = 2
+PACKAGE_SCHEMA_VERSION = 3
 EXPORT_JOB_STALE_SECONDS = 6 * 60 * 60
 
 
@@ -196,6 +196,7 @@ class KnowledgeBaseTransferService:
                         "size_bytes": document.size_bytes,
                         "tags": list(document.tags or []),
                         "metadata_json": dict(document.metadata_json or {}),
+                        "references_json": list(document.references_json or []),
                         "chunk_mode": document.chunk_mode,
                         "chunk_size": document.chunk_size,
                         "chunk_overlap": document.chunk_overlap,
@@ -349,6 +350,7 @@ class KnowledgeBaseTransferService:
                 "documents": len(documents),
                 "chunks": len(chunks),
                 "tables": len(tables),
+                "references": sum(len(document.references_json or []) for document in documents),
             },
             "index": {
                 "version": "v2" if mode == "full" else None,
@@ -452,7 +454,7 @@ class KnowledgeBaseTransferService:
             if "manifest.json" not in names or "checksums.sha256" not in names:
                 raise ValidationError("知识库包缺少 manifest 或校验文件")
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
-            if int(manifest.get("schema_version", 0)) not in {1, PACKAGE_SCHEMA_VERSION}:
+            if int(manifest.get("schema_version", 0)) not in {1, 2, PACKAGE_SCHEMA_VERSION}:
                 raise ValidationError("不支持的知识库包版本")
             if manifest.get("mode") not in {"documents", "full"}:
                 raise ValidationError("知识库包模式无效")
@@ -758,6 +760,7 @@ class KnowledgeBaseTransferService:
                     extracted_text=str(record.get("extracted_text") or ""),
                     tags=list(record.get("tags") or []),
                     metadata_json=dict(record.get("metadata_json") or {}),
+                    references_json=list(record.get("references_json") or []),
                     chunk_mode=str(record.get("chunk_mode") or "structure"),
                     chunk_size=int(record.get("chunk_size") or 512),
                     chunk_overlap=int(record.get("chunk_overlap") or 64),

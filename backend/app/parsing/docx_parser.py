@@ -1,11 +1,13 @@
+import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
 
 from docx import Document as DocxDocument
 from docx.document import Document as DocxDocumentType
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from app.parsing.base import BaseParser, ParsedDocument, ParsedElement
+from app.parsing.base import BaseParser, ParsedDocument, ParsedElement, ParsedReference
 
 
 def _iter_blocks(document: DocxDocumentType):
@@ -18,6 +20,52 @@ def _iter_blocks(document: DocxDocumentType):
             yield Paragraph(child, document)
         elif child.tag.endswith("}tbl"):
             yield Table(child, document)
+
+
+def _extract_docx_notes(file_path: str) -> list[ParsedReference]:
+    references: list[ParsedReference] = []
+    try:
+        with zipfile.ZipFile(file_path) as archive:
+            names = set(archive.namelist())
+            for member, source_type in (
+                ("word/footnotes.xml", "footnote"),
+                ("word/endnotes.xml", "endnote"),
+            ):
+                if member not in names:
+                    continue
+                root = ElementTree.fromstring(archive.read(member))
+                for note in root:
+                    local_name = note.tag.rsplit("}", 1)[-1]
+                    if local_name not in {"footnote", "endnote"}:
+                        continue
+                    note_id = next(
+                        (
+                            value
+                            for key, value in note.attrib.items()
+                            if key.rsplit("}", 1)[-1] == "id"
+                        ),
+                        "",
+                    )
+                    if note_id in {"-1", "0"}:
+                        continue
+                    text = " ".join(
+                        part.strip()
+                        for part in note.itertext()
+                        if part and part.strip()
+                    )
+                    if not text:
+                        continue
+                    references.append(
+                        ParsedReference(
+                            label=f"{source_type}-{note_id}" if note_id else "",
+                            text=text,
+                            source_type=source_type,
+                            metadata={"format": "docx", "note_id": note_id},
+                        )
+                    )
+    except (OSError, zipfile.BadZipFile, ElementTree.ParseError):
+        return []
+    return references
 
 
 class DocxParser(BaseParser):
@@ -81,5 +129,5 @@ class DocxParser(BaseParser):
             elements=elements,
             full_text=full_text,
             metadata=metadata,
+            references=_extract_docx_notes(file_path),
         )
-

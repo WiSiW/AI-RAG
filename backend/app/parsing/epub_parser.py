@@ -3,9 +3,23 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from ebooklib import ITEM_DOCUMENT, epub
 
-from app.parsing.base import BaseParser, ParsedDocument, ParsedElement
+from app.parsing.base import BaseParser, ParsedDocument, ParsedElement, ParsedReference
 
 BLOCK_TAGS = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "pre", "table"]
+NOTE_TYPES = {"footnote", "endnote", "rearnote", "doc-footnote", "doc-endnote", "doc-rearnote"}
+
+
+def _semantic_types(tag) -> set[str]:
+    values: set[str] = set()
+    for key, value in (tag.attrs or {}).items():
+        local_key = str(key).rsplit("}", 1)[-1].rsplit(":", 1)[-1]
+        if local_key not in {"type", "role"}:
+            continue
+        if isinstance(value, list):
+            values.update(str(item).casefold() for item in value)
+        else:
+            values.add(str(value).casefold())
+    return values
 
 
 class EPUBParser(BaseParser):
@@ -14,6 +28,7 @@ class EPUBParser(BaseParser):
     def parse(self, file_path: str) -> ParsedDocument:
         book = epub.read_epub(file_path, options={"ignore_ncx": True})
         elements: list[ParsedElement] = []
+        references: list[ParsedReference] = []
         spine_ids = [item_id for item_id, _ in getattr(book, "spine", [])]
         documents = []
 
@@ -28,6 +43,24 @@ class EPUBParser(BaseParser):
         for item in documents:
             soup = BeautifulSoup(item.get_content(), "lxml")
             body = soup.body or soup
+            for tag in list(body.find_all(True)):
+                semantic_types = _semantic_types(tag)
+                if semantic_types & NOTE_TYPES:
+                    text = tag.get_text(" ", strip=True)
+                    if text:
+                        endnote_types = {"endnote", "rearnote", "doc-endnote", "doc-rearnote"}
+                        source_type = "endnote" if semantic_types & endnote_types else "footnote"
+                        references.append(
+                            ParsedReference(
+                                label=str(tag.get("id") or ""),
+                                text=text,
+                                source_type=source_type,
+                                metadata={"format": "epub", "item_id": item.get_id()},
+                            )
+                        )
+                    tag.decompose()
+                elif "doc-noteref" in semantic_types or "noteref" in semantic_types:
+                    tag.decompose()
             for tag in body.find_all(BLOCK_TAGS):
                 if tag.find_parent(["li", "pre", "table"]) is not None and tag.name not in {
                     "pre",
@@ -84,5 +117,5 @@ class EPUBParser(BaseParser):
             elements=elements,
             full_text=full_text,
             metadata=metadata,
+            references=references,
         )
-

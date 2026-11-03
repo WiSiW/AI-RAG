@@ -1,6 +1,6 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Bot, Download, FileText, Pencil, RefreshCw, ScanText, Search, SlidersHorizontal, Trash2, UploadCloud } from "lucide-react";
+import { ArrowLeft, Bot, Download, FileText, ListFilter, Pencil, RefreshCw, ScanText, Search, SlidersHorizontal, Trash2, UploadCloud } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api, downloadKnowledgeBasePackage } from "../api/client";
 import { EmptyState, ErrorState, LoadingState, Modal, PageHeader, StatusBadge, formatBytes, formatDate } from "../components/UI";
@@ -126,6 +126,13 @@ export default function KnowledgeBaseDetailPage() {
       window.alert(`已排队 ${result.queued} 个 PDF，跳过 ${result.skipped} 个。`);
     },
   });
+  const reparseReferencesMutation = useMutation({
+    mutationFn: () => api.reparseReferenceDocuments(kbId),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["documents", kbId] });
+      window.alert(`已排队 ${result.queued} 个文档重建引用过滤，跳过 ${result.skipped} 个。`);
+    },
+  });
   const rebuildIndexMutation = useMutation({
     mutationFn: () => api.rebuildKnowledgeBaseIndex(kbId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["knowledge-base", kbId] }),
@@ -163,7 +170,7 @@ export default function KnowledgeBaseDetailPage() {
   if (kbQuery.error) return <ErrorState message={kbQuery.error.message} />;
   const kb = kbQuery.data!;
   const documents = docsQuery.data ?? [];
-  const actionError = deleteDocMutation.error ?? reindexMutation.error ?? rebuildIndexMutation.error ?? reparsePdfMutation.error;
+  const actionError = deleteDocMutation.error ?? reindexMutation.error ?? rebuildIndexMutation.error ?? reparsePdfMutation.error ?? reparseReferencesMutation.error;
 
   return (
     <div>
@@ -196,6 +203,16 @@ export default function KnowledgeBaseDetailPage() {
               className="btn-secondary"
             >
               <ScanText className="h-4 w-4" />重新解析 PDF
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm("确认重新解析该知识库全部 ready 文档并重建引用过滤？该操作会重新分块、增强和建立索引。")) reparseReferencesMutation.mutate();
+              }}
+              disabled={reparseReferencesMutation.isPending}
+              className="btn-secondary"
+            >
+              <ListFilter className="h-4 w-4" />重建引用过滤
             </button>
             <Link to={`/upload?kb=${kb.id}`} className="btn-primary"><UploadCloud className="h-4 w-4" />上传文档</Link>
             <Link to={`/search-quality?kb=${kb.id}`} className="btn-secondary"><Search className="h-4 w-4" />检索质检</Link>
@@ -245,6 +262,7 @@ export default function KnowledgeBaseDetailPage() {
                   <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
                     <span>{formatBytes(doc.size_bytes)}</span>
                     <span>{doc.chunk_count} 个分块</span>
+                    {doc.reference_count > 0 && <span>{doc.reference_count} 条参考</span>}
                     <span>{formatDate(doc.created_at)}</span>
                     {doc.tags.map((tag) => <span key={tag} className="chip bg-slate-100 text-slate-600">#{tag}</span>)}
                   </div>
@@ -399,4 +417,3 @@ function Metric({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-

@@ -24,7 +24,10 @@ def test_epub_parser_reads_spine(tmp_path: Path):
     book.set_title("测试电子书")
     book.set_language("zh")
     chapter = epub.EpubHtml(title="第一章", file_name="chapter.xhtml", lang="zh")
-    chapter.content = "<h1>第一章</h1><p>这是 EPUB 正文。</p><h2>小节</h2><ul><li>要点一</li></ul>"
+    chapter.content = (
+        "<h1>第一章</h1><p>这是 EPUB 正文。</p><h2>小节</h2><ul><li>要点一</li></ul>"
+        "<aside epub:type=\"footnote\" id=\"fn1\"><p>这是 EPUB 脚注。</p></aside>"
+    )
     book.add_item(chapter)
     book.toc = (chapter,)
     book.spine = ["nav", chapter]
@@ -37,3 +40,6 @@ def test_epub_parser_reads_spine(tmp_path: Path):
     assert parsed.title == "测试电子书"
     assert any(element.text == "第一章" and element.type == "title" for element in parsed.elements)
     assert any("EPUB 正文" in element.text for element in parsed.elements)
+    assert all("EPUB 脚注" not in element.text for element in parsed.elements)
+    assert parsed.references[0].source_type == "footnote"
+    assert parsed.references[0].text == "这是 EPUB 脚注。"

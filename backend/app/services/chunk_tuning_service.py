@@ -997,8 +997,15 @@ class ChunkTuningService:
                     table_manager=build_table_manager(engine_configs.get("table", [])),
                     enrichment_profile=enrichment_profile,
                 ).process(temp_path)
-                return result.parsed
-            return parse_document(temp_path)
+                parsed = result.parsed
+            else:
+                parsed = parse_document(temp_path)
+            extraction = await self.ingestion.reference_extractor.extract(
+                parsed,
+                profile=enrichment_profile,
+                gateway=self.gateway,
+            )
+            return extraction.parsed
         finally:
             if temp_path:
                 Path(temp_path).unlink(missing_ok=True)

@@ -29,6 +29,8 @@ def _apply_schema_migrations() -> None:
         document_columns = {column["name"] for column in inspector.get_columns("documents")}
         if "metadata_json" not in document_columns:
             additions.append(("documents", "metadata_json", "JSON DEFAULT '{}'"))
+        if "references_json" not in document_columns:
+            additions.append(("documents", "references_json", "JSON DEFAULT '[]'"))
         if "chunk_mode" not in document_columns:
             additions.append(("documents", "chunk_mode", "VARCHAR(40) DEFAULT 'structure'"))
     if "model_profiles" in tables:

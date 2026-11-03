@@ -34,6 +34,17 @@ class ParsedTable:
 
 
 @dataclass
+class ParsedReference:
+    label: str
+    text: str
+    source_type: str = "bibliography"
+    page_start: int | None = None
+    page_end: int | None = None
+    section_path: str = ""
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
 class ParsedDocument:
     source: str
     title: str
@@ -43,6 +54,7 @@ class ParsedDocument:
     tables: list[ParsedTable] = field(default_factory=list)
     page_traces: list[dict] = field(default_factory=list)
     pipeline_meta: dict = field(default_factory=dict)
+    references: list[ParsedReference] = field(default_factory=list)
 
     @property
     def total_chars(self) -> int:

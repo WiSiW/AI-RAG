@@ -1,5 +1,6 @@
 import json
 import math
+import re
 import time
 from typing import Any
 
@@ -7,10 +8,22 @@ import httpx
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from app.chunking.semantic_chunker import count_tokens, token_spans
 from app.core.config import settings
 from app.core.errors import UpstreamError
 from app.core.security import decrypt_secret
 from app.db.models import ModelProfile
+
+DEFAULT_RERANK_BATCH_DOCUMENTS = 16
+DEFAULT_RERANK_BATCH_TOKENS = 800
+LATIN_WORD_PATTERN = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _estimate_rerank_tokens(text: str) -> int:
+    tokens = count_tokens(text)
+    for word in LATIN_WORD_PATTERN.findall(text):
+        tokens += max(0, (len(word) + 3) // 4 - 1)
+    return tokens
 
 
 class ChatMessage(BaseModel):
@@ -26,6 +39,9 @@ def _normalize_vector(vector: list[float]) -> list[float]:
 
 
 class ModelGateway:
+    def __init__(self, http_transport: httpx.AsyncBaseTransport | None = None):
+        self._http_transport = http_transport
+
     @staticmethod
     def _api_key(profile: ModelProfile) -> str:
         return decrypt_secret(profile.api_key_encrypted) or "EMPTY"
@@ -132,22 +148,98 @@ class ModelGateway:
         api_key = self._api_key(profile)
         if api_key and api_key != "EMPTY":
             headers["Authorization"] = f"Bearer {api_key}"
-        body: dict[str, Any] = {
-            "model": profile.model_name,
-            "query": query,
-            "documents": documents,
-            "top_n": len(documents),
-        }
-        if profile.config.get("return_documents"):
-            body["return_documents"] = False
+        max_documents = self._positive_config_int(
+            profile.config, "rerank_batch_documents", DEFAULT_RERANK_BATCH_DOCUMENTS
+        )
+        max_tokens = self._positive_config_int(
+            profile.config, "rerank_batch_tokens", DEFAULT_RERANK_BATCH_TOKENS
+        )
+        batches = self._rerank_batches(
+            query,
+            documents,
+            max_documents=max_documents,
+            max_tokens=max_tokens,
+        )
+        scores = [float("-inf")] * len(documents)
         try:
-            async with httpx.AsyncClient(timeout=settings.model_request_timeout) as client:
-                response = await client.post(url, headers=headers, json=body)
-                response.raise_for_status()
-                payload = response.json()
+            async with httpx.AsyncClient(
+                timeout=settings.model_request_timeout,
+                transport=self._http_transport,
+            ) as client:
+                for batch_number, (batch, batch_tokens) in enumerate(batches, 1):
+                    body: dict[str, Any] = {
+                        "model": profile.model_name,
+                        "query": query,
+                        "documents": [text for _, text in batch],
+                        "top_n": len(batch),
+                    }
+                    if profile.config.get("return_documents"):
+                        body["return_documents"] = False
+                    try:
+                        response = await client.post(url, headers=headers, json=body)
+                        response.raise_for_status()
+                        payload = response.json()
+                    except Exception as exc:
+                        raise UpstreamError(
+                            "重排序模型调用失败"
+                            f"（第 {batch_number}/{len(batches)} 批，"
+                            f"{len(batch)} 条候选，约 {batch_tokens} tokens）：{exc}"
+                        ) from exc
+                    batch_scores = self._parse_rerank_scores(payload, len(batch))
+                    for (document_index, _), score in zip(batch, batch_scores, strict=True):
+                        scores[document_index] = max(scores[document_index], score)
         except Exception as exc:
+            if isinstance(exc, UpstreamError):
+                raise
             raise UpstreamError(f"重排序模型调用失败：{exc}") from exc
-        return self._parse_rerank_scores(payload, len(documents))
+        return [0.0 if score == float("-inf") else score for score in scores]
+
+    @staticmethod
+    def _positive_config_int(config: dict[str, Any], key: str, default: int) -> int:
+        try:
+            return max(1, int(config.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _rerank_batches(
+        cls,
+        query: str,
+        documents: list[str],
+        *,
+        max_documents: int,
+        max_tokens: int,
+    ) -> list[tuple[list[tuple[int, str]], int]]:
+        query_tokens = _estimate_rerank_tokens(query)
+        document_token_budget = max(1, max_tokens - query_tokens)
+        pieces: list[tuple[int, str]] = []
+        for document_index, document in enumerate(documents):
+            if _estimate_rerank_tokens(document) <= document_token_budget:
+                pieces.append((document_index, document))
+                continue
+            spans = token_spans(document)
+            for start in range(0, len(spans), document_token_budget):
+                end = min(start + document_token_budget, len(spans))
+                piece = document[spans[start][0] : spans[end - 1][1]]
+                pieces.append((document_index, piece))
+
+        batches: list[tuple[list[tuple[int, str]], int]] = []
+        current: list[tuple[int, str]] = []
+        current_tokens = query_tokens
+        for piece in pieces:
+            piece_tokens = _estimate_rerank_tokens(piece[1])
+            if current and (
+                len(current) >= max_documents
+                or current_tokens + piece_tokens > max_tokens
+            ):
+                batches.append((current, current_tokens))
+                current = []
+                current_tokens = query_tokens
+            current.append(piece)
+            current_tokens += piece_tokens
+        if current:
+            batches.append((current, current_tokens))
+        return batches
 
     @staticmethod
     def _parse_rerank_scores(payload: Any, count: int) -> list[float]:

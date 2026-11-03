@@ -98,6 +98,7 @@ $env:PATH = "$lib;$lib\cuda_v12;$env:PATH"
     --rerank `
     --pooling rank `
     --ctx-size 8192 `
+    --ubatch-size 2048 `
     --alias bge-reranker-v2-m3 `
     --no-webui `
     --offline
@@ -178,7 +179,7 @@ POST http://127.0.0.1:11436/v1/rerank
 | Base URL | `http://host.docker.internal:11436` |
 | 模型名称 | `bge-reranker-v2-m3` |
 | API Key | 留空 |
-| 高级配置 JSON | `{"rerank_path":"rerank"}` |
+| 高级配置 JSON | `{"rerank_path":"rerank","rerank_batch_documents":16,"rerank_batch_tokens":800}` |
 
 ### 后端直接运行在 Windows 中
 
@@ -186,9 +187,11 @@ POST http://127.0.0.1:11436/v1/rerank
 | --- | --- |
 | Base URL | `http://127.0.0.1:11436` |
 | 模型名称 | `bge-reranker-v2-m3` |
-| 高级配置 JSON | `{"rerank_path":"rerank"}` |
+| 高级配置 JSON | `{"rerank_path":"rerank","rerank_batch_documents":16,"rerank_batch_tokens":800}` |
 
 保存后点击“测试”，应显示连接成功。
+
+应用侧会按 `rerank_batch_documents`（默认 16 条）和 `rerank_batch_tokens`（默认 800）自动拆分 Rerank 请求，避免 `llama-server --rerank` 因一次提交的候选过长、过多而返回 `500 Compute error`。单个超长候选会被切片重排，并取最高相关分。显存更充足或服务端支持更大输入时，可在高级配置中提高 `rerank_batch_tokens`。
 
 ## 7. 后台启动
 

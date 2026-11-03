@@ -141,6 +141,34 @@ class KnowledgeBaseRead(ORMModel):
     embedding_profile_name: str | None = None
 
 
+class DocumentReferenceRead(BaseModel):
+    label: str = ""
+    text: str
+    source_type: str = "bibliography"
+    page_start: int | None = None
+    page_end: int | None = None
+    section_path: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReferenceExtractionRead(BaseModel):
+    status: str = "ready"
+    generated_by: str = "rules"
+    prompt_version: str = ""
+    reference_count: int = 0
+    bibliography_count: int = 0
+    footnote_count: int = 0
+    endnote_count: int = 0
+    inline_markers_removed: int = 0
+    inline_marker_samples: list[str] = Field(default_factory=list)
+    reference_like_tail_count: int = 0
+    body_elements: int = 0
+    body_characters: int = 0
+    model_profile_id: str = ""
+    model_name: str = ""
+    warnings: list[str] = Field(default_factory=list)
+
+
 class DocumentRead(ORMModel):
     id: str
     kb_id: str
@@ -157,10 +185,24 @@ class DocumentRead(ORMModel):
     created_at: datetime
     updated_at: datetime
     chunk_count: int = 0
+    reference_count: int = 0
 
 
 class DocumentDetail(DocumentRead):
     extracted_text: str
+    references: list[DocumentReferenceRead] = Field(default_factory=list)
+    reference_extraction: ReferenceExtractionRead = Field(default_factory=ReferenceExtractionRead)
+
+
+class DocumentContentRead(BaseModel):
+    document_id: str
+    filename: str
+    content_type: str
+    text: str
+    status: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    references: list[DocumentReferenceRead] = Field(default_factory=list)
+    reference_extraction: ReferenceExtractionRead = Field(default_factory=ReferenceExtractionRead)
 
 
 class DocumentTableRead(ORMModel):
@@ -1013,4 +1055,3 @@ class HealthResponse(BaseModel):
     service: str
     version: str
     components: dict[str, HealthComponent] = Field(default_factory=dict)
-

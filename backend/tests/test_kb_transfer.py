@@ -50,6 +50,17 @@ def build_package(path: Path, *, mode: str = "documents", include_table: bool = 
             "size_bytes": 10,
             "tags": ["demo"],
             "metadata_json": {"title": "手册"},
+            "references_json": [
+                {
+                    "label": "[1]",
+                    "text": "参考条目",
+                    "source_type": "bibliography",
+                    "page_start": 1,
+                    "page_end": 1,
+                    "section_path": "参考文献",
+                    "metadata": {},
+                }
+            ],
             "chunk_mode": "structure",
             "chunk_size": 512,
             "chunk_overlap": 64,
@@ -136,7 +147,7 @@ def build_package(path: Path, *, mode: str = "documents", include_table: bool = 
         ),
     }
     manifest = {
-        "schema_version": 2 if include_table else 1,
+        "schema_version": 3 if include_table else 1,
         "package_id": str(uuid.uuid4()),
         "created_at": "2026-10-29T00:00:00+00:00",
         "app_version": "test",
@@ -156,7 +167,11 @@ def build_package(path: Path, *, mode: str = "documents", include_table: bool = 
                 }
             },
         },
-        "counts": {"documents": 1, "chunks": 2, **({"tables": 1} if include_table else {})},
+        "counts": {
+            "documents": 1,
+            "chunks": 2,
+            **({"tables": 1, "references": 1} if include_table else {}),
+        },
         "index": {"version": "v2" if mode == "full" else None, "dimensions": 3},
         "file_hashes": {name: _sha(data) for name, data in payloads.items()},
     }

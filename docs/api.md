@@ -29,6 +29,8 @@ Authorization: Bearer <access_token>
 
 LLM 与增强模型支持 `request_timeout_seconds`（默认 `1200` 秒）和 `request_max_retries`（默认 `2`，表示首次请求后的额外重试次数，最多共 3 次请求）。模型页面以分钟展示超时时间；Embedding 与 Rerank 继续使用全局请求超时。
 
+Rerank 的高级配置支持 `rerank_path`（默认 `rerank`）、`rerank_batch_documents`（默认 `16`）和 `rerank_batch_tokens`（默认 `800`）。网关会按条数和估算 token 数自动拆批，超长单文档会切片并按最高相关分归并，避免本地 `llama-server --rerank` 因单次输入过大返回 500。
+
 ## 知识库
 
 | 方法 | 路径 | 说明 |
@@ -51,11 +53,15 @@ LLM 与增强模型支持 `request_timeout_seconds`（默认 `1200` 秒）和 `r
 | GET | `/documents/{id}` | 文档详情 |
 | GET | `/documents/{id}/content` | 提取文本 |
 | GET | `/documents/{id}/chunks` | 分块列表 |
-| POST | `/documents/{id}/reindex` | 重新入库 |
+| POST | `/documents/{id}/reindex` | 重新入库 |\n| POST | `/knowledge-bases/{id}/documents/reparse-references` | 批量重建 ready 文档的正文/引用过滤 |
 | DELETE | `/documents/{id}` | 删除文档与索引 |
 | GET | `/ingestion-jobs/{id}` | 入库任务状态 |
 
 分块响应额外包含 `granularity_level`（`L1/L2/L3`）、`granule_type`、`parent_chunk_id`、`context_prefix`、`summary`、`keywords`、`qa_pairs`、`hypothetical_questions`、`enrichment_status` 与 `enrichment_meta`。`qa_pairs` 元素包含 `question`、基于原文的 `answer` 和 `question_type`（`detail/comparison/summary`）。
+
+文档入库会先分离正文与引用。文末参考文献、脚注、尾注及正文引用标记不会生成 chunk、Embedding 或 BM25 数据；引用条目保存在 `references_json`，只通过管理端引用参考弹窗展示，弹窗支持关键词搜索和分页翻页。文档详情和内容响应包含 `reference_count`、`references` 与 `reference_extraction`，其中 `reference_extraction.status=degraded` 表示歧义边界已保守保留为正文或 LLM 兜底不可用。
+
+批量重建引用过滤接口只排队状态为 `ready` 的文档，返回 `queued`、`skipped` 和 `job_ids`；该操作会重新分块、增强并建立索引，页面必须二次确认。
 
 上传字段：
 

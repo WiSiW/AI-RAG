@@ -44,6 +44,7 @@ $arguments = @(
     "--rerank",
     "--pooling", "rank",
     "--ctx-size", "8192",
+    "--ubatch-size", "2048",
     "--alias", ($Model -replace ':latest$', ''),
     "--no-webui",
     "--offline"

@@ -153,6 +153,7 @@ class Document(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list] = mapped_column(JSON, default=list)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    references_json: Mapped[list] = mapped_column(JSON, default=list)
     chunk_mode: Mapped[str] = mapped_column(String(40), default="structure")
     chunk_size: Mapped[int] = mapped_column(Integer, default=512)
     chunk_overlap: Mapped[int] = mapped_column(Integer, default=64)
@@ -727,5 +728,3 @@ class PublishedApi(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
-
-

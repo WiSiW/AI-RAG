@@ -1,12 +1,13 @@
 import re
 from pathlib import Path
 
-from app.parsing.base import BaseParser, ParsedDocument, ParsedElement
+from app.parsing.base import BaseParser, ParsedDocument, ParsedElement, ParsedReference
 
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 CODE_PATTERN = re.compile(r"^```([\w+-]*)\s*$")
 TABLE_ROW_PATTERN = re.compile(r"^\s*\|.*\|\s*$")
 LIST_PATTERN = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+FOOTNOTE_PATTERN = re.compile(r"^ {0,3}\[\^([^\]]+)\]:\s*(.*)$")
 
 
 class MarkdownParser(BaseParser):
@@ -28,6 +29,36 @@ class MarkdownParser(BaseParser):
                     key, value = line.split(":", 1)
                     front_matter[key.strip()] = value.strip().strip('"').strip("'")
                 lines = lines[end + 1 :]
+        references: list[ParsedReference] = []
+        body_lines: list[str] = []
+        i = 0
+        while i < len(lines):
+            footnote = FOOTNOTE_PATTERN.match(lines[i])
+            if footnote is None:
+                body_lines.append(lines[i])
+                i += 1
+                continue
+            label = footnote.group(1).strip()
+            parts = [footnote.group(2).strip()]
+            i += 1
+            while i < len(lines):
+                continuation = lines[i]
+                if continuation.strip() and not continuation.startswith((" ", "\t")):
+                    break
+                if continuation.strip():
+                    parts.append(continuation.strip())
+                i += 1
+            text = " ".join(part for part in parts if part).strip()
+            if text:
+                references.append(
+                    ParsedReference(
+                        label=label,
+                        text=text,
+                        source_type="footnote",
+                        metadata={"syntax": "markdown_footnote"},
+                    )
+                )
+        lines = body_lines
         elements: list[ParsedElement] = []
         i = 0
 
@@ -119,6 +150,6 @@ class MarkdownParser(BaseParser):
             elements=elements,
             full_text=raw,
             metadata=metadata,
+            references=references,
         )
-
 

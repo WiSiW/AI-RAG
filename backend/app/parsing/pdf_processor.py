@@ -296,7 +296,13 @@ class PDFProcessingPipeline:
                     "bbox": bbox,
                     "block_type": "title" if level else "paragraph",
                     "level": level,
-                    "metadata": {"page": page_number},
+                    "metadata": {
+                        "page": page_number,
+                        "font_size": font_size,
+                        "is_superscript": any(
+                            int(span.get("flags") or 0) & 1 for span in line.get("spans", [])
+                        ),
+                    },
                 }
             )
         return {"elements": elements, "text": "\n".join(item["text"] for item in elements)}

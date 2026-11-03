@@ -41,10 +41,13 @@ from app.schemas import (
     BatchUploadItem,
     BatchUploadResponse,
     ChunkRead,
+    DocumentContentRead,
     DocumentDetail,
     DocumentRead,
+    DocumentReferenceRead,
     DocumentTableRead,
     IngestionJobRead,
+    ReferenceExtractionRead,
     ReparsePdfResponse,
     ServerArchiveRequest,
     UploadResponse,
@@ -76,6 +79,7 @@ def _document_read(document: Document, chunk_count: int = 0) -> DocumentRead:
         created_at=document.created_at,
         updated_at=document.updated_at,
         chunk_count=chunk_count,
+        reference_count=len(document.references_json or []),
     )
 
 
@@ -607,26 +611,49 @@ def get_document(
         select(func.count(DocumentChunk.id)).where(DocumentChunk.document_id == document.id)
     ) or 0
     base = _document_read(document, count)
-    return DocumentDetail(**base.model_dump(), extracted_text=document.extracted_text)
+    references = [
+        DocumentReferenceRead.model_validate(item)
+        for item in (document.references_json or [])
+        if isinstance(item, dict)
+    ]
+    extraction = ReferenceExtractionRead.model_validate(
+        (document.metadata_json or {}).get("reference_extraction") or {}
+    )
+    return DocumentDetail(
+        **base.model_dump(),
+        extracted_text=document.extracted_text,
+        references=references,
+        reference_extraction=extraction,
+    )
 
 
-@router.get("/documents/{document_id}/content")
+@router.get("/documents/{document_id}/content", response_model=DocumentContentRead)
 def get_document_content(
     document_id: str,
     _: str = Depends(get_current_admin),
     db: Session = Depends(get_db),
-) -> dict:
+) -> DocumentContentRead:
     document = db.get(Document, document_id)
     if document is None:
         raise NotFoundError("文档不存在")
-    return {
-        "document_id": document.id,
-        "filename": document.filename,
-        "content_type": document.content_type,
-        "text": document.extracted_text,
-        "status": document.status,
-        "metadata": document.metadata_json or {},
-    }
+    references = [
+        DocumentReferenceRead.model_validate(item)
+        for item in (document.references_json or [])
+        if isinstance(item, dict)
+    ]
+    extraction = ReferenceExtractionRead.model_validate(
+        (document.metadata_json or {}).get("reference_extraction") or {}
+    )
+    return DocumentContentRead(
+        document_id=document.id,
+        filename=document.filename,
+        content_type=document.content_type,
+        text=document.extracted_text,
+        status=document.status,
+        metadata=document.metadata_json or {},
+        references=references,
+        reference_extraction=extraction,
+    )
 
 
 @router.get("/documents/{document_id}/file")
@@ -766,6 +793,41 @@ def reparse_pdf_documents(
     return ReparsePdfResponse(queued=len(job_ids), skipped=skipped, job_ids=job_ids)
 
 
+@router.post(
+    "/knowledge-bases/{kb_id}/documents/reparse-references",
+    response_model=ReparsePdfResponse,
+)
+def reparse_reference_documents(
+    kb_id: str,
+    _: str = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+) -> ReparsePdfResponse:
+    _get_kb(db, kb_id)
+    _ensure_kb_writable(db, kb_id)
+    documents = list(db.scalars(select(Document).where(Document.kb_id == kb_id)))
+    job_ids: list[str] = []
+    skipped = 0
+    for document in documents:
+        if document.status != DocumentStatus.READY:
+            skipped += 1
+            continue
+        document.status = DocumentStatus.PENDING
+        document.error = None
+        job = IngestionJob(
+            id=str(uuid.uuid4()),
+            document_id=document.id,
+            status=JobStatus.PENDING,
+        )
+        db.add(job)
+        db.flush()
+        if _enqueue(document, job):
+            job_ids.append(job.id)
+        else:
+            skipped += 1
+    db.commit()
+    return ReparsePdfResponse(queued=len(job_ids), skipped=skipped, job_ids=job_ids)
+
+
 @router.delete("/documents/{document_id}", status_code=204)
 def delete_document(
     document_id: str,
@@ -828,7 +890,3 @@ def _stream_document(document: Document):
         media_type=document.content_type or "application/octet-stream",
         headers=headers,
     )
-
-
-
-

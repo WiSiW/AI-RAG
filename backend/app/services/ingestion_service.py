@@ -45,6 +45,7 @@ from app.parsing.pdf_tables import build_table_manager
 from app.parsing.registry import parse_document
 from app.retrieval.context_window import build_context_prefix, with_context_prefix
 from app.services.parsing_engine_service import engine_configs_for_run
+from app.services.reference_extraction_service import ReferenceExtractionService
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ class IngestionService:
         self.qa_generator = QAGenerator(self.gateway)
         self.vector_store = MilvusVectorStore()
         self.bm25_store = BM25Store()
+        self.reference_extractor = ReferenceExtractionService()
 
     async def ingest(self, db: Session, document_id: str, job_id: str) -> None:
         document = db.get(Document, document_id)
@@ -99,12 +101,24 @@ class IngestionService:
                 pdf_pipeline_meta = pdf_result.pipeline_meta
             else:
                 parsed = parse_document(temp_path)
+            extraction = await self.reference_extractor.extract(
+                parsed,
+                profile=enrichment_profile,
+                gateway=self.gateway,
+            )
+            parsed = extraction.parsed
+            document.references_json = self.reference_extractor.as_dicts(extraction.references)
+            document.extracted_text = parsed.full_text
             parsed_metadata = build_document_metadata(temp_path, parsed)
             document.metadata_json = {
                 **(document.metadata_json or {}),
                 **parsed_metadata,
                 **({"pdf_pipeline": pdf_pipeline_meta} if pdf_pipeline_meta else {}),
+                "reference_extraction": extraction.meta,
             }
+            if not self.reference_extractor.has_usable_body(parsed):
+                db.commit()
+                raise ValidationError("过滤引用后未识别到可用正文，文档未建立索引")
             try:
                 chunk_mode = validate_chunk_mode(document.chunk_mode)
             except ValueError:
@@ -268,6 +282,8 @@ class IngestionService:
                     enrichment_profile.model_name if enrichment_profile else "rules"
                 ),
                 "tables": len(parsed.tables),
+                "references": len(extraction.references),
+                "reference_extraction": extraction.meta,
                 "pdf_pipeline": pdf_pipeline_meta,
             }
             db.commit()
@@ -872,6 +888,3 @@ class IngestionService:
             ],
             index_version="v2",
         )
-
-
-

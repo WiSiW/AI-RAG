@@ -1,14 +1,16 @@
 import { Children, cloneElement, isValidElement, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Bot, ClipboardCheck, FileText, Hash, Layers3, Search, Sparkles, Table2, X } from "lucide-react";
+import { ArrowLeft, BookOpen, Bot, ChevronLeft, ChevronRight, ClipboardCheck, FileText, Hash, Layers3, Search, Sparkles, Table2, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
 import { api } from "../api/client";
-import { ErrorState, LoadingState, PageHeader, StatusBadge, formatBytes } from "../components/UI";
-import type { Chunk, DocumentTable, QAPair } from "../types";
+import { ErrorState, LoadingState, Modal, PageHeader, StatusBadge, formatBytes } from "../components/UI";
+import type { Chunk, DocumentReference, DocumentTable, QAPair, ReferenceExtraction } from "../types";
+
+const CHUNK_PAGE_SIZE = 10;
 
 export default function DocumentPreviewPage() {
   const { documentId = "" } = useParams();
@@ -17,7 +19,10 @@ export default function DocumentPreviewPage() {
   const urlQuery = searchParams.get("q") ?? "";
   const submittedQuery = urlQuery.trim();
   const [query, setQuery] = useState(urlQuery);
+  const [chunkPage, setChunkPage] = useState(1);
+  const [referencesOpen, setReferencesOpen] = useState(false);
   const chunkRefs = useRef<Record<string, HTMLAnchorElement | null>>({});
+  const chunkListRef = useRef<HTMLDivElement | null>(null);
 
   const documentQuery = useQuery({ queryKey: ["document", documentId], queryFn: () => api.getDocument(documentId), enabled: !!documentId });
   const chunksQuery = useQuery({ queryKey: ["chunks", documentId], queryFn: () => api.listChunks(documentId), enabled: !!documentId });
@@ -40,16 +45,38 @@ export default function DocumentPreviewPage() {
   );
   const markdownComponents = useMemo(() => highlightedMarkdownComponents(searchTerms), [searchTerms]);
   const hasSearch = searchTerms.length > 0;
+  const chunkPageCount = Math.max(1, Math.ceil(filteredChunks.length / CHUNK_PAGE_SIZE));
+  const safeChunkPage = Math.min(chunkPage, chunkPageCount);
+  const chunkPageStart = (safeChunkPage - 1) * CHUNK_PAGE_SIZE;
+  const visibleChunks = filteredChunks.slice(chunkPageStart, chunkPageStart + CHUNK_PAGE_SIZE);
 
   useEffect(() => {
     setQuery(urlQuery);
   }, [urlQuery]);
 
   useEffect(() => {
+    setChunkPage(1);
+  }, [submittedQuery]);
+
+  useEffect(() => {
+    if (chunkPage > chunkPageCount) setChunkPage(chunkPageCount);
+  }, [chunkPage, chunkPageCount]);
+
+  useEffect(() => {
+    if (!selectedChunk) return;
+    const index = filteredChunks.findIndex((chunk) => chunk.id === selectedChunk);
+    if (index >= 0) setChunkPage(Math.floor(index / CHUNK_PAGE_SIZE) + 1);
+  }, [selectedChunk, filteredChunks]);
+
+  useEffect(() => {
+    chunkListRef.current?.scrollTo({ top: 0 });
+  }, [safeChunkPage]);
+
+  useEffect(() => {
     if (selectedChunk && chunkRefs.current[selectedChunk]) {
       chunkRefs.current[selectedChunk]?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
-  }, [selectedChunk, chunksQuery.data, submittedQuery]);
+  }, [selectedChunk, visibleChunks, submittedQuery]);
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -94,6 +121,16 @@ export default function DocumentPreviewPage() {
         action={
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge status={document.status} />
+            <button
+              type="button"
+              onClick={() => setReferencesOpen(true)}
+              className="btn-secondary"
+              disabled={content.references.length === 0}
+              title={content.references.length === 0 ? "未识别到引用参考" : "查看引用参考"}
+            >
+              <BookOpen className="h-4 w-4" />引用参考
+              <span className="chip bg-slate-100 text-[10px] text-slate-600">{content.references.length}</span>
+            </button>
             <Link to={`/chunk-evaluations?kb=${document.kb_id}&document=${document.id}`} className="btn-secondary"><ClipboardCheck className="h-4 w-4" />评估完整性</Link>
             <Link to={`/chat?kb=${document.kb_id}&document=${document.id}`} className="btn-secondary"><Bot className="h-4 w-4" />针对本文档问答</Link>
           </div>
@@ -115,6 +152,9 @@ export default function DocumentPreviewPage() {
           <Metadata label="PDF 解析状态" value={String(pdfPipeline(document).status ?? "-")} />
           <Metadata label="原生 / OCR / 失败页" value={`${String(pdfPipeline(document).native_pages ?? 0)} / ${String(pdfPipeline(document).ocr_pages ?? 0)} / ${String((pdfPipeline(document).failed_pages as unknown[] | undefined)?.length ?? 0)}`} />
           <Metadata label="独立表格" value={String(tables.length)} />
+          <Metadata label="参考条目" value={String(content.references.length)} />
+          <Metadata label="引用过滤" value={content.reference_extraction.status === "degraded" ? "规则降级" : "完成"} />
+          <Metadata label="行内引用清理" value={String(content.reference_extraction.inline_markers_removed ?? 0)} />
         </div>
       </div>
 
@@ -166,7 +206,7 @@ export default function DocumentPreviewPage() {
               </div>
             )}
           </div>
-          <div className="thin-scrollbar flex-1 overflow-y-auto p-3">
+          <div ref={chunkListRef} className="thin-scrollbar flex-1 overflow-y-auto p-3">
             {!chunks.length ? (
               <div className="grid h-full place-items-center px-6 text-center text-sm text-slate-400">
                 文档尚未生成分块，请等待入库完成或检查错误信息。
@@ -182,7 +222,7 @@ export default function DocumentPreviewPage() {
               </div>
             ) : (
               <div className="space-y-2">
-                {filteredChunks.map((chunk) => {
+                {visibleChunks.map((chunk) => {
                   const active = selectedChunk === chunk.id;
                   return (
                     <Link
@@ -232,6 +272,31 @@ export default function DocumentPreviewPage() {
               </div>
             )}
           </div>
+          {filteredChunks.length > 0 && (
+            <div className="flex items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 text-xs text-slate-500">
+              <span>
+                {safeChunkPage} / {chunkPageCount} 页 · 共 {filteredChunks.length} 个分块
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="btn-secondary px-2.5 py-1.5 text-xs"
+                  onClick={() => setChunkPage((current) => Math.max(1, current - 1))}
+                  disabled={safeChunkPage <= 1}
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />上一页
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary px-2.5 py-1.5 text-xs"
+                  onClick={() => setChunkPage((current) => Math.min(chunkPageCount, current + 1))}
+                  disabled={safeChunkPage >= chunkPageCount}
+                >
+                  下一页<ChevronRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="panel flex max-h-[76vh] min-h-[520px] flex-col overflow-hidden">
@@ -254,6 +319,13 @@ export default function DocumentPreviewPage() {
           </div>
         </section>
       </div>
+      <ReferenceModal
+        open={referencesOpen}
+        onClose={() => setReferencesOpen(false)}
+        filename={document.filename}
+        references={content.references}
+        extraction={content.reference_extraction}
+      />
     </div>
   );
 }
@@ -262,6 +334,171 @@ function pdfPipeline(document: { metadata_json: Record<string, unknown> }): Reco
   return (document.metadata_json.pdf_pipeline as Record<string, unknown>) ?? {};
 }
 
+const REFERENCE_PAGE_SIZE = 8;
+
+function referenceSourceLabel(sourceType: string): string {
+  if (sourceType === "bibliography") return "参考文献";
+  if (sourceType === "footnote") return "脚注";
+  if (sourceType === "endnote") return "尾注";
+  return sourceType || "参考";
+}
+
+function referenceSearchText(reference: DocumentReference): string {
+  return [
+    reference.label,
+    reference.text,
+    reference.section_path,
+    reference.source_type,
+    referenceSourceLabel(reference.source_type),
+    reference.page_start,
+    reference.page_end,
+  ].filter((value) => value != null).join("\n");
+}
+
+function ReferenceModal({
+  open,
+  onClose,
+  filename,
+  references,
+  extraction,
+}: {
+  open: boolean;
+  onClose: () => void;
+  filename: string;
+  references: DocumentReference[];
+  extraction: ReferenceExtraction;
+}) {
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const terms = useMemo(() => toSearchTerms(search), [search]);
+  const filtered = useMemo(
+    () => references.filter((reference) => {
+      const haystack = referenceSearchText(reference).toLocaleLowerCase();
+      return terms.every((term) => haystack.includes(term));
+    }),
+    [references, terms],
+  );
+  const totalPages = Math.max(1, Math.ceil(filtered.length / REFERENCE_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageStart = (safePage - 1) * REFERENCE_PAGE_SIZE;
+  const visible = filtered.slice(pageStart, pageStart + REFERENCE_PAGE_SIZE);
+  const matchCount = useMemo(
+    () => filtered.reduce((total, item) => total + countOccurrences(referenceSearchText(item), terms), 0),
+    [filtered, terms],
+  );
+
+  useEffect(() => {
+    if (!open) {
+      setSearch("");
+      setPage(1);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  return (
+    <Modal open={open} onClose={onClose} title={`引用参考 · ${filename}`} wide>
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+          <span className={`chip text-[10px] ${extraction.status === "degraded" ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>
+            {extraction.status === "degraded" ? "规则降级" : "提取完成"}
+          </span>
+          <span>共 {references.length} 条参考，仅用于查阅，不参与检索与生成。</span>
+          {terms.length > 0 && <span className="chip bg-amber-50 text-amber-700">{matchCount} 处命中</span>}
+        </div>
+
+        {extraction.warnings.length > 0 && (
+          <div className="rounded-xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">
+            {extraction.warnings.join("；")}
+          </div>
+        )}
+
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            className="input py-2 pl-9 pr-9 text-sm"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="搜索引用标签、正文、页码或章节"
+            maxLength={200}
+            aria-label="搜索引用参考"
+          />
+          {search && (
+            <button
+              type="button"
+              onClick={() => setSearch("")}
+              className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+              aria-label="清除引用搜索"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+
+        <div className="thin-scrollbar max-h-[52vh] min-h-48 space-y-3 overflow-y-auto pr-1">
+          {visible.length === 0 ? (
+            <div className="grid min-h-48 place-items-center rounded-xl border border-dashed border-slate-200 px-5 text-center text-sm text-slate-400">
+              {references.length === 0 ? "未识别到独立的参考文献、脚注或尾注。" : "没有匹配的引用参考。"}
+            </div>
+          ) : visible.map((reference, index) => (
+            <article key={`${reference.source_type}-${reference.label}-${pageStart + index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="font-mono font-medium text-brand-700">{reference.label || `${pageStart + index + 1}.`}</span>
+                <span className="chip bg-white text-[10px] text-slate-600">{referenceSourceLabel(reference.source_type)}</span>
+                {reference.page_start != null && (
+                  <span className="chip bg-white text-[10px] text-slate-500">
+                    第 {reference.page_start}{reference.page_end && reference.page_end !== reference.page_start ? `-${reference.page_end}` : ""} 页
+                  </span>
+                )}
+              </div>
+              <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">
+                <HighlightText text={reference.text} terms={terms} />
+              </p>
+              {reference.section_path && (
+                <div className="mt-3 text-xs text-slate-400">
+                  <HighlightText text={reference.section_path} terms={terms} />
+                </div>
+              )}
+            </article>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4 text-xs text-slate-500">
+          <span>
+            {filtered.length > 0
+              ? `第 ${pageStart + 1}-${Math.min(pageStart + REFERENCE_PAGE_SIZE, filtered.length)} 条，共 ${filtered.length} 条`
+              : "0 条"}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="btn-secondary px-3 py-2 text-xs"
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              disabled={safePage <= 1}
+            >
+              <ChevronLeft className="h-4 w-4" />上一页
+            </button>
+            <span className="min-w-16 text-center font-medium text-slate-700">{safePage} / {totalPages}</span>
+            <button
+              type="button"
+              className="btn-secondary px-3 py-2 text-xs"
+              onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+              disabled={safePage >= totalPages}
+            >
+              下一页<ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
 function TableGallery({ tables }: { tables: DocumentTable[] }) {
   return (
     <section className="panel mb-4 p-4">

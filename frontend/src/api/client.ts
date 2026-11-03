@@ -200,6 +200,10 @@ export const api = {
     request<ReparsePdfResponse>(`/knowledge-bases/${kbId}/documents/reparse-pdfs`, {
       method: "POST",
     }),
+  reparseReferenceDocuments: (kbId: string) =>
+    request<ReparsePdfResponse>(`/knowledge-bases/${kbId}/documents/reparse-references`, {
+      method: "POST",
+    }),
   getChunk: (documentId: string, chunkId: string) =>
     request<Chunk>(`/documents/${documentId}/chunks/${chunkId}`),
   deleteDocument: (id: string) => request<void>(`/documents/${id}`, { method: "DELETE" }),
@@ -598,7 +602,3 @@ export async function downloadKnowledgeBasePackage(job: KnowledgeBaseTransferJob
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-
-
-
-

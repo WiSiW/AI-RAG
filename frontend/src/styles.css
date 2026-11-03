@@ -174,3 +174,18 @@ textarea {
 .animate-fade-rise {
   animation: fade-rise 180ms ease-out both;
 }
+
+.source-location-content [data-current-chunk="true"] {
+  border-radius: 0.2rem;
+  background: #fde68a;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.22);
+  color: #1f2937;
+  scroll-margin: 5rem;
+}
+
+.source-location-content pre[data-current-chunk="true"],
+.source-location-content code[data-current-chunk="true"] {
+  display: inline;
+  background: #fde68a;
+  color: #1f2937;
+}

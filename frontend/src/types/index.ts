@@ -47,6 +47,34 @@ export interface KnowledgeBase {
   embedding_profile_name: string | null;
 }
 
+export interface DocumentReference {
+  label: string;
+  text: string;
+  source_type: "bibliography" | "footnote" | "endnote" | string;
+  page_start: number | null;
+  page_end: number | null;
+  section_path: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface ReferenceExtraction {
+  status: "ready" | "degraded" | string;
+  generated_by: string;
+  prompt_version: string;
+  reference_count: number;
+  bibliography_count: number;
+  footnote_count: number;
+  endnote_count: number;
+  inline_markers_removed: number;
+  inline_marker_samples: string[];
+  reference_like_tail_count: number;
+  body_elements: number;
+  body_characters: number;
+  model_profile_id: string;
+  model_name: string;
+  warnings: string[];
+}
+
 export interface DocumentItem {
   id: string;
   kb_id: string;
@@ -63,10 +91,13 @@ export interface DocumentItem {
   created_at: string;
   updated_at: string;
   chunk_count: number;
+  reference_count: number;
 }
 
 export interface DocumentDetail extends DocumentItem {
   extracted_text: string;
+  references: DocumentReference[];
+  reference_extraction: ReferenceExtraction;
 }
 
 export interface Chunk {
@@ -723,5 +754,6 @@ export interface DocumentContent {
   text: string;
   status: string;
   metadata: Record<string, unknown>;
+  references: DocumentReference[];
+  reference_extraction: ReferenceExtraction;
 }
-
