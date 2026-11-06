@@ -7,6 +7,7 @@ from app.db.models import KnowledgeBase
 from app.db.session import SessionLocal
 from app.evaluation.service import ChunkEvaluationService
 from app.services.chunk_tuning_service import ChunkTuningService
+from app.services.conversation_summary_service import ConversationSummaryService
 from app.services.ingestion_service import IngestionService
 from app.services.knowledge_base_transfer_service import KnowledgeBaseTransferService
 from app.workers.celery_app import celery_app
@@ -29,6 +30,32 @@ def ingest_document_task(self, document_id: str, job_id: str) -> None:
         logger.exception("ingestion task failed document_id=%s", document_id)
         if self.request.retries < self.max_retries:
             raise self.retry(exc=exc, countdown=10 * (self.request.retries + 1)) from exc
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="zhiyuan.summarize_conversation",
+    bind=True,
+    max_retries=2,
+    time_limit=5 * 60,
+    soft_time_limit=4 * 60 + 30,
+)
+def summarize_conversation_task(
+    self,
+    conversation_id: str,
+    summary_task_id: str,
+) -> None:
+    db = SessionLocal()
+    service = ConversationSummaryService()
+    try:
+        asyncio.run(service.summarize(db, conversation_id, summary_task_id))
+    except Exception as exc:
+        logger.exception("conversation summary task failed conversation_id=%s", conversation_id)
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=5 * (self.request.retries + 1)) from exc
+        service.mark_failed(db, conversation_id, summary_task_id, str(exc))
         raise
     finally:
         db.close()

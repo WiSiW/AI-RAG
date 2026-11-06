@@ -29,6 +29,14 @@ function parseChatStage(value: unknown): ChatStage | undefined {
   return value === "retrieving" || value === "generating" ? value : undefined;
 }
 
+function summaryStatusMeta(status: string | undefined) {
+  if (status === "running") return { label: "摘要更新中", className: "bg-amber-50 text-amber-700" };
+  if (status === "failed") return { label: "摘要失败", className: "bg-red-50 text-red-700" };
+  if (status === "degraded") return { label: "降级摘要", className: "bg-amber-50 text-amber-700" };
+  if (status === "succeeded") return { label: "摘要已更新", className: "bg-emerald-50 text-emerald-700" };
+  return null;
+}
+
 const prompts = [
   "请概括这个知识库的核心内容。",
   "文档中有哪些关键流程和注意事项？",
@@ -54,6 +62,8 @@ export default function ChatPage() {
     queryKey: ["conversation", conversationParam],
     queryFn: () => api.getConversation(conversationParam),
     enabled: !!conversationParam,
+    refetchInterval: (query) =>
+      query.state.data?.summary_status === "running" ? 3000 : false,
   });
 
   const [kbIds, setKbIds] = useState<string[]>(initialKbIds);
@@ -384,6 +394,7 @@ export default function ChatPage() {
   if (kbQuery.error) return <ErrorState message={kbQuery.error.message} />;
   if (modelQuery.error) return <ErrorState message={modelQuery.error.message} />;
   if (conversationParam && conversationQuery.error) return <ErrorState message={conversationQuery.error.message} />;
+  const summaryStatus = summaryStatusMeta(conversationQuery.data?.summary_status);
 
   return (
     <div>
@@ -441,7 +452,10 @@ export default function ChatPage() {
           <section className="panel flex min-h-[72vh] flex-col overflow-hidden">
             <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5">
               <div className="flex items-center gap-2 font-semibold text-slate-900"><Bot className="h-5 w-5 text-brand-600" />智库助手</div>
-              {conversationId && <span className="chip bg-emerald-50 text-emerald-700">会话已保存</span>}
+              <div className="flex items-center gap-2">
+                {summaryStatus && <span className={`chip ${summaryStatus.className}`}>{summaryStatus.label}</span>}
+                {conversationId && <span className="chip bg-emerald-50 text-emerald-700">会话已保存</span>}
+              </div>
             </div>
 
             <div className="thin-scrollbar flex-1 overflow-y-auto px-4 py-6 sm:px-6">

@@ -64,8 +64,14 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 32
     session_window_size: int = 10
     summary_trigger_messages: int = 16
+    summary_trigger_tokens: int = 3000
     summary_keep_messages: int = 8
+    summary_keep_tokens: int = 1200
+    summary_batch_input_tokens: int = 4000
+    summary_task_stale_seconds: int = 900
     summary_max_tokens: int = 512
+    history_max_tokens: int = 2200
+    history_message_max_tokens: int = 600
     query_rewrite_max_tokens: int = 256
     rag_candidate_top_k: int = 20
     rag_final_top_k: int = 5
@@ -78,6 +84,9 @@ class Settings(BaseSettings):
     rag_neighbor_context_tokens: int = 180
     rag_context_window_max_tokens: int = 1200
     rag_context_prefix_summary_chars: int = 120
+    rag_prompt_max_tokens: int = 12000
+    rag_answer_reserve_tokens: int = 1200
+    rag_prompt_overhead_tokens: int = 800
     enrichment_batch_size: int = 8
     enrichment_max_tokens: int = 4096
     qa_generation_batch_size: int = 4

@@ -101,6 +101,22 @@ def _apply_schema_migrations() -> None:
         }
         if "document_id" not in conversation_columns:
             additions.append(("conversations", "document_id", "VARCHAR(36)"))
+        if "summary_json" not in conversation_columns:
+            additions.append(("conversations", "summary_json", "JSON DEFAULT '{}'"))
+        if "summary_message_count" not in conversation_columns:
+            additions.append(("conversations", "summary_message_count", "INTEGER DEFAULT 0"))
+        if "summary_status" not in conversation_columns:
+            additions.append(("conversations", "summary_status", "VARCHAR(20) DEFAULT 'idle'"))
+        if "summary_version" not in conversation_columns:
+            additions.append(("conversations", "summary_version", "INTEGER DEFAULT 0"))
+        if "summary_started_at" not in conversation_columns:
+            additions.append(("conversations", "summary_started_at", "TIMESTAMP"))
+        if "summary_updated_at" not in conversation_columns:
+            additions.append(("conversations", "summary_updated_at", "TIMESTAMP"))
+        if "summary_task_id" not in conversation_columns:
+            additions.append(("conversations", "summary_task_id", "VARCHAR(100)"))
+        if "summary_error" not in conversation_columns:
+            additions.append(("conversations", "summary_error", "TEXT"))
     with engine.begin() as connection:
         for table, column, ddl in additions:
             connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))

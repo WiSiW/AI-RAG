@@ -4,9 +4,24 @@ import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { EmptyState, ErrorState, LoadingState, PageHeader, formatDate } from "../components/UI";
 
+function summaryStatusMeta(status: string) {
+  if (status === "running") return { label: "摘要更新中", className: "text-amber-600" };
+  if (status === "failed") return { label: "摘要失败，后续问答将重试", className: "text-red-600" };
+  if (status === "degraded") return { label: "已生成降级摘要", className: "text-amber-600" };
+  if (status === "succeeded") return { label: "已生成摘要", className: "text-emerald-600" };
+  return null;
+}
+
 export default function HistoryPage() {
   const queryClient = useQueryClient();
-  const conversationsQuery = useQuery({ queryKey: ["conversations"], queryFn: api.listConversations });
+  const conversationsQuery = useQuery({
+    queryKey: ["conversations"],
+    queryFn: api.listConversations,
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((conversation) => conversation.summary_status === "running")
+        ? 3000
+        : false,
+  });
   const deleteMutation = useMutation({
     mutationFn: api.deleteConversation,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["conversations"] }),
@@ -31,7 +46,9 @@ export default function HistoryPage() {
       ) : (
         <div className="panel overflow-hidden">
           <div className="divide-y divide-slate-100">
-            {conversations.map((conversation) => (
+            {conversations.map((conversation) => {
+              const summaryStatus = summaryStatusMeta(conversation.summary_status);
+              return (
               <div key={conversation.id} className="group flex items-center gap-4 px-5 py-4 transition hover:bg-slate-50/70">
                 <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-50 text-brand-700"><MessageSquare className="h-5 w-5" /></div>
                 <div className="min-w-0 flex-1">
@@ -40,7 +57,7 @@ export default function HistoryPage() {
                     <span>{conversation.message_count} 条消息</span>
                     <span>{conversation.knowledge_base_names.join("、") || "知识库已删除"}</span>
                     <span>更新于 {formatDate(conversation.updated_at)}</span>
-                    {conversation.summary && <span className="text-emerald-600">已生成摘要</span>}
+                    {summaryStatus && <span className={summaryStatus.className}>{summaryStatus.label}</span>}
                   </div>
                   {conversation.summary && <p className="mt-2 line-clamp-1 text-xs text-slate-400">{conversation.summary}</p>}
                 </div>
@@ -56,7 +73,8 @@ export default function HistoryPage() {
                   <Trash2 className="h-4 w-4" />
                 </button>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

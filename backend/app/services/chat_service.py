@@ -12,7 +12,6 @@ from app.chunking.semantic_chunker import count_tokens
 from app.core.config import settings
 from app.core.errors import NotFoundError, ValidationError
 from app.db.models import (
-    Conversation,
     Document,
     DocumentChunk,
     DocumentStatus,
@@ -21,14 +20,13 @@ from app.db.models import (
     ModelKind,
     ModelProfile,
 )
-from app.db.session import SessionLocal
 from app.generation.citation_parser import parse_citations
 from app.generation.prompts import QUERY_REWRITE_PROMPT, SYSTEM_PROMPT, build_chat_prompt
 from app.indexing.bm25_store import BM25Store
 from app.indexing.model_gateway import ModelGateway
 from app.indexing.types import RetrievedChunk
 from app.indexing.vector_store import MilvusVectorStore
-from app.memory.session_manager import ConversationMemory
+from app.memory.session_manager import ConversationMemory, HistoryContext
 from app.retrieval.complexity import BERTComplexityClient, classify_complexity
 from app.retrieval.context_window import (
     clip_around_anchor,
@@ -53,6 +51,7 @@ from app.schemas import (
     TableContextRead,
     TraceChunkSnapshot,
 )
+from app.services.conversation_summary_service import ConversationSummaryService
 
 NO_ANSWER = "根据现有资料无法回答该问题。"
 CitationUrlBuilder = Callable[[str], tuple[str | None, str | None]]
@@ -80,28 +79,6 @@ def sse_event(event: str, data: dict) -> str:
 logger = logging.getLogger(__name__)
 
 
-async def summarize_conversation(
-    db: Session, conversation_id: str, profile_id: str, memory: ConversationMemory
-) -> None:
-    try:
-        conversation = db.get(Conversation, conversation_id)
-        profile = db.get(ModelProfile, profile_id)
-        if conversation and profile:
-            await memory.maybe_summarize(db, conversation, profile)
-    except Exception:
-        logger.exception("conversation summary failed")
-
-
-async def summarize_background(
-    conversation_id: str, profile_id: str, memory: ConversationMemory
-) -> None:
-    db = SessionLocal()
-    try:
-        await summarize_conversation(db, conversation_id, profile_id, memory)
-    finally:
-        db.close()
-
-
 class ChatService:
     def __init__(self):
         self.gateway = ModelGateway()
@@ -110,6 +87,7 @@ class ChatService:
         self.retriever = HybridRetriever(self.vector_store, self.bm25_store)
         self.reranker = Reranker(self.gateway)
         self.memory = ConversationMemory(self.gateway)
+        self.summary_service = ConversationSummaryService(self.gateway, self.memory)
         self.complexity_client = BERTComplexityClient()
         self.multihop_planner = MultiHopPlanner(self.gateway)
 
@@ -242,6 +220,7 @@ class ChatService:
         enforce_context_budget: bool = True,
         expand_context: bool = False,
         retrieval_mode: str = "single",
+        context_budget_tokens: int | None = None,
     ) -> RetrievalOutcome:
         planner_profile = self._planner_profile(db, knowledge_bases)
         decision = await classify_complexity(
@@ -262,6 +241,7 @@ class ChatService:
                 document_id=document_id,
                 enforce_context_budget=enforce_context_budget,
                 expand_context=expand_context,
+                context_budget_tokens=context_budget_tokens,
             )
             outcome.trace = RetrievalTrace(
                 requested_mode=retrieval_mode,
@@ -283,6 +263,7 @@ class ChatService:
             document_id=document_id,
             enforce_context_budget=enforce_context_budget,
             expand_context=expand_context,
+            context_budget_tokens=context_budget_tokens,
         )
 
     async def _retrieve_multi_hop(
@@ -299,6 +280,7 @@ class ChatService:
         document_id: str | None,
         enforce_context_budget: bool,
         expand_context: bool,
+        context_budget_tokens: int | None,
     ) -> RetrievalOutcome:
         kb_settings = knowledge_bases[0].settings or {}
         max_steps = max(
@@ -444,7 +426,7 @@ class ChatService:
         if expand_context:
             result = self._expand_context_windows(db, result)
         if enforce_context_budget:
-            result = self._limit_context_tokens(result)
+            result = self._limit_context_tokens(result, context_budget_tokens)
         if not result:
             uncertain = True
         notice = (
@@ -570,6 +552,7 @@ class ChatService:
         document_id: str | None = None,
         enforce_context_budget: bool = True,
         expand_context: bool = False,
+        context_budget_tokens: int | None = None,
     ) -> RetrievalOutcome:
         embedding_profiles: dict[str, ModelProfile] = {}
         for knowledge_base in knowledge_bases:
@@ -678,23 +661,33 @@ class ChatService:
         if expand_context:
             result = self._expand_context_windows(db, result)
         if enforce_context_budget:
-            result = self._limit_context_tokens(result)
+            result = self._limit_context_tokens(result, context_budget_tokens)
         return RetrievalOutcome(
             chunks=result,
             failed_knowledge_base_ids=failed_knowledge_base_ids,
         )
 
     @staticmethod
-    def _limit_context_tokens(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    def _limit_context_tokens(
+        chunks: list[RetrievedChunk],
+        max_tokens: int | None = None,
+    ) -> list[RetrievedChunk]:
         selected: list[RetrievedChunk] = []
         total = 0
+        budget = max(1, max_tokens or settings.rag_multi_kb_max_context_tokens)
         for chunk in chunks:
             token_count = count_tokens(chunk.context_text or chunk.content)
-            if selected and total + token_count > settings.rag_multi_kb_max_context_tokens:
+            if not selected and token_count > budget:
+                chunk.context_text = clip_head_tokens(
+                    chunk.context_text or chunk.content,
+                    budget,
+                )
+                token_count = count_tokens(chunk.context_text)
+            if selected and total + token_count > budget:
                 continue
             selected.append(chunk)
             total += token_count
-            if total >= settings.rag_multi_kb_max_context_tokens:
+            if total >= budget:
                 break
         return selected
 
@@ -982,14 +975,51 @@ class ChatService:
         ]
 
     @staticmethod
-    def _usage(answer: str, chunks: list[RetrievedChunk], profile: ModelProfile) -> dict:
+    def _context_budget_for_prompt(history: HistoryContext, query: str) -> int:
+        available = (
+            settings.rag_prompt_max_tokens
+            - settings.rag_prompt_overhead_tokens
+            - settings.rag_answer_reserve_tokens
+            - history.token_count
+            - count_tokens(query)
+        )
+        minimum = settings.rag_context_window_max_tokens
+        return max(
+            minimum,
+            min(settings.rag_multi_kb_max_context_tokens, available),
+        )
+
+    @staticmethod
+    def _usage(
+        answer: str,
+        chunks: list[RetrievedChunk],
+        profile: ModelProfile,
+        history: HistoryContext | None = None,
+        query: str = "",
+    ) -> dict:
+        context_tokens = sum(
+            count_tokens(chunk.context_text or chunk.content) for chunk in chunks
+        )
+        answer_tokens = count_tokens(answer)
+        history_tokens = history.token_count if history else 0
+        summary_tokens = history.summary_tokens if history else 0
+        query_tokens = count_tokens(query)
         return {
             "model": profile.model_name,
             "context_chunks": len(chunks),
-            "context_tokens_estimate": sum(
-                count_tokens(chunk.context_text or chunk.content) for chunk in chunks
+            "context_tokens_estimate": context_tokens,
+            "history_tokens_estimate": history_tokens,
+            "summary_tokens_estimate": summary_tokens,
+            "history_truncated": bool(history and history.truncated),
+            "prompt_tokens_estimate": (
+                context_tokens
+                + history_tokens
+                + query_tokens
+                + answer_tokens
+                + settings.rag_prompt_overhead_tokens
             ),
-            "answer_tokens_estimate": count_tokens(answer),
+            "query_tokens_estimate": query_tokens,
+            "answer_tokens_estimate": answer_tokens,
         }
 
     @staticmethod
@@ -1060,7 +1090,7 @@ class ChatService:
                 first_query=request.query,
                 document_id=request.document_id,
             )
-            history = self.memory.history_text(db, conversation)
+            history = self.memory.history_context(db, conversation).text
             rewritten_query = await self._rewrite_query(
                 query=request.query,
                 history=history,
@@ -1162,10 +1192,11 @@ class ChatService:
         )
         effective_document_id = request.document_id or conversation.document_id
         self._validate_document(db, knowledge_bases, effective_document_id)
-        history = self.memory.history_text(db, conversation)
+        history_context = self.memory.history_context(db, conversation)
+        context_budget = self._context_budget_for_prompt(history_context, request.query)
         rewritten_query = await self._rewrite_query(
             query=request.query,
-            history=history,
+            history=history_context.text,
             llm_profile=llm_profile,
             scope="、".join(knowledge_base.name for knowledge_base in knowledge_bases),
         )
@@ -1177,10 +1208,11 @@ class ChatService:
             document_id=effective_document_id,
             expand_context=True,
             retrieval_mode=request.retrieval_mode,
+            context_budget_tokens=context_budget,
         )
         chunks = outcome.chunks
         if chunks:
-            prompt = build_chat_prompt(request.query, chunks, history)
+            prompt = build_chat_prompt(request.query, chunks, history_context.text)
             answer = await self.gateway.complete(
                 llm_profile,
                 [
@@ -1200,7 +1232,13 @@ class ChatService:
         citations = self._attach_citation_urls(
             parse_citations(answer, chunks), citation_url_builder
         )
-        usage = self._usage(answer, chunks, llm_profile)
+        usage = self._usage(
+            answer,
+            chunks,
+            llm_profile,
+            history_context,
+            request.query,
+        )
         usage["failed_knowledge_base_ids"] = outcome.failed_knowledge_base_ids
         if outcome.trace:
             usage["retrieval_trace"] = outcome.trace.model_dump()
@@ -1214,7 +1252,7 @@ class ChatService:
             context=self._context_payload(chunks),
             usage=usage,
         )
-        await summarize_conversation(db, conversation.id, llm_profile.id, self.memory)
+        self.summary_service.maybe_schedule(db, conversation)
         return ChatResponse(
             conversation_id=conversation.id,
             message_id=message.id,
@@ -1247,7 +1285,8 @@ class ChatService:
         )
         effective_document_id = request.document_id or conversation.document_id
         self._validate_document(db, knowledge_bases, effective_document_id)
-        history = self.memory.history_text(db, conversation)
+        history_context = self.memory.history_context(db, conversation)
+        context_budget = self._context_budget_for_prompt(history_context, request.query)
         stage: ChatStageValue = "retrieving"
         rewritten_query = request.query
         outcome: RetrievalOutcome | None = None
@@ -1260,7 +1299,13 @@ class ChatService:
             citations = self._attach_citation_urls(
                 parse_citations(answer, chunks), citation_url_builder
             )
-            usage = self._usage(answer, chunks, llm_profile)
+            usage = self._usage(
+                answer,
+                chunks,
+                llm_profile,
+                history_context,
+                request.query,
+            )
             if outcome is not None:
                 usage["failed_knowledge_base_ids"] = outcome.failed_knowledge_base_ids
                 if outcome.trace:
@@ -1277,7 +1322,7 @@ class ChatService:
             )
             rewritten_query = await self._rewrite_query(
                 query=request.query,
-                history=history,
+                history=history_context.text,
                 llm_profile=llm_profile,
                 scope="、".join(knowledge_base.name for knowledge_base in knowledge_bases),
             )
@@ -1289,6 +1334,7 @@ class ChatService:
                 document_id=effective_document_id,
                 expand_context=True,
                 retrieval_mode=request.retrieval_mode,
+                context_budget_tokens=context_budget,
             )
             chunks = outcome.chunks
             if outcome.trace:
@@ -1340,7 +1386,7 @@ class ChatService:
                 },
             )
             if chunks:
-                prompt = build_chat_prompt(request.query, chunks, history)
+                prompt = build_chat_prompt(request.query, chunks, history_context.text)
                 async for token in self.gateway.stream(
                     llm_profile,
                     [
@@ -1379,6 +1425,7 @@ class ChatService:
                 "citations",
                 {"citations": [citation.model_dump() for citation in citations]},
             )
+            self.summary_service.maybe_schedule(db, conversation)
             yield sse_event(
                 "done",
                 {
@@ -1387,9 +1434,6 @@ class ChatService:
                     "usage": usage,
                     "uncertainty_notice": uncertainty_notice,
                 },
-            )
-            asyncio.create_task(
-                summarize_background(conversation.id, llm_profile.id, self.memory)
             )
         except (asyncio.CancelledError, GeneratorExit):
             if not exchange_saved:
@@ -1407,6 +1451,7 @@ class ChatService:
                         context=self._context_payload(chunks),
                         usage=usage,
                     )
+                    self.summary_service.maybe_schedule(db, conversation)
                 except Exception:
                     db.rollback()
                     logger.exception("failed to persist stopped chat")

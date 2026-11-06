@@ -645,7 +645,18 @@ class Conversation(Base):
         ForeignKey("model_profiles.id"), nullable=True
     )
     summary: Mapped[str] = mapped_column(Text, default="")
+    summary_json: Mapped[dict] = mapped_column(JSON, default=dict)
     summary_message_count: Mapped[int] = mapped_column(Integer, default=0)
+    summary_status: Mapped[str] = mapped_column(String(20), default="idle")
+    summary_version: Mapped[int] = mapped_column(Integer, default=0)
+    summary_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    summary_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    summary_task_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    summary_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

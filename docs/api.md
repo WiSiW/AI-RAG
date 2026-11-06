@@ -221,6 +221,10 @@ JSONL 第一行可为数据集元信息，后续每行一条问题，所有行�
 - 会话会固定本次选择的知识库范围；更改范围需要新建会话。
 - `retrieval_mode` 支持 `auto`、`single`、`multi`，默认 `auto`。
 
+会话列表与详情响应在兼容保留 `summary` 字符串的同时，额外返回 `summary_status`、`summary_version`、`summary_message_count` 和 `summary_updated_at`。`summary_status` 取值为 `idle/running/succeeded/degraded/failed`。摘要由独立 Celery 任务异步更新，不阻塞 Chat 返回；达到未摘要消息数或 token 阈值后才触发，流式和非流式请求均不会同步等待摘要完成。
+
+Chat `usage` 额外包含 `history_tokens_estimate`、`summary_tokens_estimate`、`history_truncated`、`query_tokens_estimate` 和 `prompt_tokens_estimate`。历史窗口与结构化会话摘要均受 token 预算限制；历史摘要只用于理解指代、用户目标和约束，事实性结论仍必须由本轮参考资料支撑并标注引用。
+
 检索结果额外返回 `matched_representations`、`matched_questions`、`representation_scores`、`representation_ranks`、`granularity_level`、`granule_type`、`parent_chunk_id`、`context_prefix` 与 `context_text`，用于查看命中的召回路由、具体生成问题、粒度、上下文位置和 L3 父段落关系；`vector_score/vector_rank` 继续保持为最佳向量路由的兼容字段。Search 调试接口的 `context_text` 默认等于小块正文；Chat 生成时会动态填充父窗口和邻块。
 
 Chat 和 Search 响应还返回 `retrieval_trace`，包含复杂度判定、每轮子问题、新增证据数、停止原因及不确定状态。Chat 的 `uncertainty_notice` 非空时，同一提示会追加在最终回答末尾。
@@ -267,7 +271,7 @@ event: error
 data: {"message":"错误详情"}
 ```
 
-首个 `stage` 事件在查询改写和检索开始前发送，用于确认会话已经创建并提示当前处于检索阶段；检索结束后、首个回答 token 前发送 `stage=generating`。客户端可通过关闭 SSE 连接停止当前问答。服务端会取消后续检索轮次和模型流，并将已得到的部分回答持久化，助手消息的 `usage` 中会包含 `stopped=true` 和 `stopped_stage=retrieving|generating`。已停止的助手回答仍会出现在会话历史中，但不会进入后续对话的模型上下文或会话摘要；用户问题仍保留。
+首个 `stage` 事件在查询改写和检索开始前发送，用于确认会话已经创建并提示当前处于检索阶段；检索结束后、首个回答 token 前发送 `stage=generating`。客户端可通过关闭 SSE 连接停止当前问答。服务端会取消后续检索轮次和模型流，并将已得到的部分回答持久化，助手消息的 `usage` 中会包含 `stopped=true` 和 `stopped_stage=retrieving|generating`。已停止的助手回答仍会出现在会话历史中，但不会进入后续对话的模型上下文或会话摘要；用户问题会以“未完成提问”保留。
 
 ## 健康检查
 

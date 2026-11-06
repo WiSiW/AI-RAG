@@ -4,11 +4,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import app.services.chat_service as chat_service_module
 from app.indexing.types import RetrievedChunk
-from app.memory.session_manager import ConversationMemory
+from app.memory.session_manager import ConversationMemory, HistoryContext
 from app.schemas import ChatRequest
 from app.services.chat_service import ChatService, RetrievalOutcome
+from app.services.conversation_summary_service import ConversationSummaryService
 
 
 def parse_sse_event(raw_event: str) -> tuple[str, dict]:
@@ -33,6 +33,40 @@ def make_chunk() -> RetrievedChunk:
     )
 
 
+def test_context_token_budget_clips_single_oversized_chunk():
+    chunk = make_chunk()
+    chunk.context_text = "超长上下文内容"
+
+    selected = ChatService._limit_context_tokens([chunk], max_tokens=2)
+
+    assert len(selected) == 1
+    assert selected[0].context_text == "超长"
+
+
+def test_usage_reports_history_query_and_prompt_estimates():
+    history = HistoryContext(
+        text="用户：上一轮问题",
+        token_count=8,
+        included_message_count=1,
+        truncated=True,
+        summary_tokens=3,
+    )
+
+    usage = ChatService._usage(
+        "回答",
+        [make_chunk()],
+        SimpleNamespace(model_name="chat-test"),
+        history,
+        "当前问题",
+    )
+
+    assert usage["history_tokens_estimate"] == 8
+    assert usage["summary_tokens_estimate"] == 3
+    assert usage["history_truncated"] is True
+    assert usage["query_tokens_estimate"] == 4
+    assert usage["prompt_tokens_estimate"] > usage["context_tokens_estimate"]
+
+
 class FakeMemory:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -41,8 +75,8 @@ class FakeMemory:
     def get_or_create(self, db, **kwargs):
         return self.conversation
 
-    def history_text(self, db, conversation) -> str:
-        return ""
+    def history_context(self, db, conversation) -> HistoryContext:
+        return HistoryContext(text="", token_count=0, included_message_count=0, truncated=False)
 
     def add_exchange(self, db, conversation, **kwargs):
         self.calls.append(kwargs)
@@ -68,6 +102,7 @@ def make_service(
     memory = FakeMemory()
     service.memory = memory
     service.gateway = FakeGateway(tokens)
+    service.summary_service = SimpleNamespace(maybe_schedule=lambda db, conversation: True)
     knowledge_base = SimpleNamespace(id="kb-1", name="测试知识库")
     profile = SimpleNamespace(id="llm-1", model_name="chat-test")
     monkeypatch.setattr(service, "_get_kbs", lambda db, ids: [knowledge_base])
@@ -78,10 +113,6 @@ def make_service(
     retrieve = AsyncMock(return_value=outcome)
     monkeypatch.setattr(service, "_retrieve", retrieve)
 
-    async def noop_summary(*args, **kwargs) -> None:
-        return None
-
-    monkeypatch.setattr(chat_service_module, "summarize_background", noop_summary)
     return service, memory, rewrite
 
 
@@ -166,48 +197,31 @@ async def test_closing_after_exchange_is_saved_does_not_duplicate(monkeypatch):
     assert "stopped" not in memory.calls[0]["usage"]
 
 
-@pytest.mark.asyncio
-async def test_stopped_assistant_is_excluded_from_history_and_summary(monkeypatch):
+def test_stopped_assistant_is_excluded_from_history_and_summary(monkeypatch):
     memory = ConversationMemory(gateway=SimpleNamespace())
     memory.redis = None
     messages = [
-        SimpleNamespace(role="user", content="问题一", usage={}),
+        SimpleNamespace(id="m1", role="user", content="问题一", usage={}),
         SimpleNamespace(
+            id="m2",
             role="assistant",
             content="未完成内容",
             usage={"stopped": True, "stopped_stage": "generating"},
         ),
-        SimpleNamespace(role="user", content="问题二", usage={}),
-        SimpleNamespace(role="assistant", content="正常回答", usage={}),
+        SimpleNamespace(id="m3", role="user", content="问题二", usage={}),
+        SimpleNamespace(id="m4", role="assistant", content="正常回答", usage={}),
     ]
     monkeypatch.setattr(memory, "messages", lambda db, conversation_id: messages)
     conversation = SimpleNamespace(id="conversation-1", summary="", summary_message_count=0)
 
-    history = memory.history_text(object(), conversation)
+    history = memory.history_context(object(), conversation).text
+    assert "[未完成提问]" in history
     assert "问题一" in history
     assert "未完成内容" not in history
     assert "正常回答" in history
 
-    prompts: list[list[dict[str, str]]] = []
-
-    class SummaryGateway:
-        async def complete(self, profile, prompt, **kwargs):
-            prompts.append(prompt)
-            return "会话摘要"
-
-    class FakeDb:
-        def commit(self):
-            return None
-
-        def scalar(self, statement):
-            return 16
-
-    memory.gateway = SummaryGateway()
-    profile = SimpleNamespace(id="llm-1")
-
-    await memory.maybe_summarize(FakeDb(), conversation, profile)
-
-    assert prompts
-    prompt_text = prompts[0][0]["content"]
-    assert "未完成内容" not in prompt_text
-    assert "正常回答" in prompt_text
+    prepared = ConversationSummaryService._summary_messages(messages)
+    summary_text = "\n".join(item.content for item in prepared)
+    assert "[未完成提问]" in summary_text
+    assert "未完成内容" not in summary_text
+    assert "正常回答" in summary_text

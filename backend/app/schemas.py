@@ -23,6 +23,7 @@ KnowledgeBaseExportMode = Literal["documents", "full"]
 KnowledgeBaseIndexPolicy = Literal["strict", "rebuild"]
 RetrievalModeValue = Literal["auto", "single", "multi"]
 ChatStageValue = Literal["retrieving", "generating"]
+SummaryStatusValue = Literal["idle", "running", "succeeded", "degraded", "failed"]
 ParsingEngineCategory = Literal["ocr", "table", "layout"]
 
 
@@ -918,6 +919,10 @@ class ConversationRead(ORMModel):
     title: str
     llm_profile_id: str | None
     summary: str
+    summary_status: SummaryStatusValue = "idle"
+    summary_version: int = 0
+    summary_message_count: int = 0
+    summary_updated_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     message_count: int = 0

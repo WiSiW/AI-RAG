@@ -263,6 +263,10 @@ export interface Conversation {
   title: string;
   llm_profile_id: string | null;
   summary: string;
+  summary_status: "idle" | "running" | "succeeded" | "degraded" | "failed";
+  summary_version: number;
+  summary_message_count: number;
+  summary_updated_at: string | null;
   created_at: string;
   updated_at: string;
   message_count: number;

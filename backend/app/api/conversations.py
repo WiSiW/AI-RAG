@@ -11,6 +11,7 @@ from app.schemas import ConversationDetail, ConversationRead, MessageRead
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 memory = ConversationMemory()
+SUMMARY_STATUSES = {"idle", "running", "succeeded", "degraded", "failed"}
 
 
 def _knowledge_base_ids(conversation: Conversation) -> list[str]:
@@ -18,6 +19,11 @@ def _knowledge_base_ids(conversation: Conversation) -> list[str]:
     if ids:
         return ids
     return [conversation.knowledge_base_id] if conversation.knowledge_base_id else []
+
+
+def _summary_status(conversation: Conversation) -> str:
+    status = str(conversation.summary_status or "idle")
+    return status if status in SUMMARY_STATUSES else "idle"
 
 
 @router.get("", response_model=list[ConversationRead])
@@ -56,6 +62,10 @@ def list_conversations(
             title=conversation.title,
             llm_profile_id=conversation.llm_profile_id,
             summary=conversation.summary,
+            summary_status=_summary_status(conversation),
+            summary_version=conversation.summary_version or 0,
+            summary_message_count=conversation.summary_message_count or 0,
+            summary_updated_at=conversation.summary_updated_at,
             created_at=conversation.created_at,
             updated_at=conversation.updated_at,
             message_count=count,
@@ -92,6 +102,10 @@ def get_conversation(
         title=conversation.title,
         llm_profile_id=conversation.llm_profile_id,
         summary=conversation.summary,
+        summary_status=_summary_status(conversation),
+        summary_version=conversation.summary_version or 0,
+        summary_message_count=conversation.summary_message_count or 0,
+        summary_updated_at=conversation.summary_updated_at,
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
         message_count=len(messages),

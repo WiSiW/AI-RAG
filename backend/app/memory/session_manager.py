@@ -1,24 +1,43 @@
+import json
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import redis
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.chunking.semantic_chunker import count_tokens
 from app.core.config import settings
 from app.core.errors import NotFoundError, ValidationError
 from app.db.models import (
     Conversation,
     ConversationKnowledgeBase,
     Message,
-    ModelProfile,
 )
-from app.generation.prompts import SUMMARY_PROMPT
 from app.indexing.model_gateway import ModelGateway
+from app.retrieval.context_window import clip_head_tokens, clip_tail_tokens
 from app.schemas import Citation
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class HistoryContext:
+    text: str
+    token_count: int
+    included_message_count: int
+    truncated: bool
+    summary_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class _HistoryBlock:
+    text: str
+    message_count: int
+    token_count: int
+    truncated: bool
 
 
 class ConversationMemory:
@@ -30,7 +49,7 @@ class ConversationMemory:
             self.redis = None
 
     def _cache_key(self, conversation_id: str) -> str:
-        return f"zhiyuan:history:{conversation_id}"
+        return f"zhiyuan:history:v2:{conversation_id}"
 
     def invalidate(self, conversation_id: str) -> None:
         if self.redis is None:
@@ -115,35 +134,161 @@ class ConversationMemory:
         usage = message.usage if isinstance(message.usage, dict) else {}
         return message.role == "assistant" and bool(usage.get("stopped"))
 
-    def history_text(self, db: Session, conversation: Conversation) -> str:
+    @staticmethod
+    def _truncate_message(content: str, max_tokens: int) -> tuple[str, bool]:
+        if max_tokens <= 0 or count_tokens(content) <= max_tokens:
+            return content, False
+        marker = " [中间内容已截断] "
+        marker_tokens = count_tokens(marker)
+        available = max(0, max_tokens - marker_tokens)
+        if available <= 0:
+            return clip_head_tokens(content, max_tokens), True
+        head_tokens = max(1, available * 2 // 3)
+        tail_tokens = max(0, available - head_tokens)
+        head = clip_head_tokens(content, head_tokens)
+        tail = clip_tail_tokens(content, tail_tokens) if tail_tokens else ""
+        return f"{head}{marker}{tail}".strip(), True
+
+    @classmethod
+    def _history_blocks(cls, messages: list[Message]) -> list[_HistoryBlock]:
+        blocks: list[_HistoryBlock] = []
+        index = 0
+        max_message_tokens = max(1, settings.history_message_max_tokens)
+        while index < len(messages):
+            message = messages[index]
+            if message.role == "user":
+                next_message = messages[index + 1] if index + 1 < len(messages) else None
+                user_text, user_truncated = cls._truncate_message(
+                    message.content, max_message_tokens
+                )
+                if next_message is not None and next_message.role == "assistant":
+                    if cls._is_stopped_assistant(next_message):
+                        block_text = f"[未完成提问]\n用户：{user_text}"
+                        message_count = 2
+                        truncated = user_truncated
+                    else:
+                        assistant_text, assistant_truncated = cls._truncate_message(
+                            next_message.content, max_message_tokens
+                        )
+                        block_text = f"用户：{user_text}\n助手：{assistant_text}"
+                        message_count = 2
+                        truncated = user_truncated or assistant_truncated
+                    index += 2
+                else:
+                    block_text = f"[未完成提问]\n用户：{user_text}"
+                    message_count = 1
+                    truncated = user_truncated
+                    index += 1
+            else:
+                if cls._is_stopped_assistant(message):
+                    index += 1
+                    continue
+                assistant_text, assistant_truncated = cls._truncate_message(
+                    message.content, max_message_tokens
+                )
+                block_text = f"助手：{assistant_text}"
+                message_count = 1
+                truncated = assistant_truncated
+                index += 1
+            blocks.append(
+                _HistoryBlock(
+                    text=block_text,
+                    message_count=message_count,
+                    token_count=count_tokens(block_text),
+                    truncated=truncated,
+                )
+            )
+        return blocks
+
+    def history_context(
+        self,
+        db: Session,
+        conversation: Conversation,
+        *,
+        max_tokens: int | None = None,
+    ) -> HistoryContext:
         cache_key = self._cache_key(conversation.id)
         if self.redis is not None:
             try:
                 cached = self.redis.get(cache_key)
                 if cached:
-                    return cached
+                    payload = json.loads(cached)
+                    return HistoryContext(**payload)
             except Exception:
                 logger.warning("failed to read conversation cache", exc_info=True)
 
+        budget = max(0, max_tokens if max_tokens is not None else settings.history_max_tokens)
+        if budget == 0:
+            return HistoryContext(text="", token_count=0, included_message_count=0, truncated=False)
+
         messages = self.messages(db, conversation.id)
-        recent = messages[conversation.summary_message_count :][
-            -(settings.session_window_size * 2) :
-        ]
         lines: list[str] = []
+        summary_tokens = 0
+        summary_truncated = False
         if conversation.summary:
-            lines.append(f"【较早对话摘要】\n{conversation.summary}")
-        for message in recent:
-            if self._is_stopped_assistant(message):
-                continue
-            role = "用户" if message.role == "user" else "助手"
-            lines.append(f"{role}：{message.content}")
+            summary_label = "【较早对话摘要】\n"
+            label_tokens = count_tokens(summary_label)
+            summary_budget = min(
+                settings.summary_max_tokens,
+                max(0, budget - label_tokens),
+            )
+            summary_text = clip_head_tokens(conversation.summary, summary_budget)
+            if summary_text:
+                summary_block = f"{summary_label}{summary_text}"
+                lines.append(summary_block)
+                summary_tokens = count_tokens(summary_block)
+                summary_truncated = count_tokens(conversation.summary) > summary_budget
+
+        recent_messages = messages[conversation.summary_message_count :]
+        blocks = self._history_blocks(recent_messages)
+        selected: list[_HistoryBlock] = []
+        remaining = max(0, budget - summary_tokens)
+        included_messages = 0
+        truncated = summary_truncated
+        for block in reversed(blocks):
+            if included_messages + block.message_count > settings.session_window_size * 2:
+                truncated = True
+                break
+            if block.token_count > remaining:
+                truncated = True
+                break
+            selected.append(block)
+            included_messages += block.message_count
+            remaining -= block.token_count
+            truncated = truncated or block.truncated
+
+        for block in reversed(selected):
+            lines.append(block.text)
         text = "\n".join(lines)
+        context = HistoryContext(
+            text=text,
+            token_count=count_tokens(text),
+            included_message_count=included_messages,
+            truncated=truncated,
+            summary_tokens=summary_tokens,
+        )
         if self.redis is not None:
             try:
-                self.redis.setex(cache_key, 3600, text)
+                self.redis.setex(
+                    cache_key,
+                    3600,
+                    json.dumps(
+                        {
+                            "text": context.text,
+                            "token_count": context.token_count,
+                            "included_message_count": context.included_message_count,
+                            "truncated": context.truncated,
+                            "summary_tokens": context.summary_tokens,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
             except Exception:
                 logger.warning("failed to write conversation cache", exc_info=True)
-        return text
+        return context
+
+    def history_text(self, db: Session, conversation: Conversation) -> str:
+        return self.history_context(db, conversation).text
 
     def add_exchange(
         self,
@@ -179,53 +324,6 @@ class ConversationMemory:
         db.commit()
         self.invalidate(conversation.id)
         return assistant_message
-
-    async def maybe_summarize(
-        self,
-        db: Session,
-        conversation: Conversation,
-        llm_profile: ModelProfile,
-    ) -> None:
-        total = db.scalar(
-            select(func.count(Message.id)).where(Message.conversation_id == conversation.id)
-        ) or 0
-        if total < settings.summary_trigger_messages:
-            return
-        cutoff = total - settings.summary_keep_messages
-        if cutoff <= conversation.summary_message_count:
-            return
-        messages = self.messages(db, conversation.id)
-        to_summarize = messages[conversation.summary_message_count : cutoff]
-        to_summarize = [
-            message for message in to_summarize if not self._is_stopped_assistant(message)
-        ]
-        if not to_summarize:
-            conversation.summary_message_count = cutoff
-            db.commit()
-            self.invalidate(conversation.id)
-            return
-        new_text = "\n".join(
-            f"{'用户' if message.role == 'user' else '助手'}：{message.content}"
-            for message in to_summarize
-        )
-        prompt = SUMMARY_PROMPT.format(
-            existing_summary=conversation.summary or "无",
-            new_messages=new_text,
-        )
-        try:
-            summary = await self.gateway.complete(
-                llm_profile,
-                [{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=settings.summary_max_tokens,
-            )
-        except Exception:
-            logger.exception("conversation summary generation failed")
-            return
-        conversation.summary = summary.strip()
-        conversation.summary_message_count = cutoff
-        db.commit()
-        self.invalidate(conversation.id)
 
     @staticmethod
     def json_messages(messages: list[Message]) -> list[dict]:
