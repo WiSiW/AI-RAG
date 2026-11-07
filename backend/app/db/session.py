@@ -117,6 +117,12 @@ def _apply_schema_migrations() -> None:
             additions.append(("conversations", "summary_task_id", "VARCHAR(100)"))
         if "summary_error" not in conversation_columns:
             additions.append(("conversations", "summary_error", "TEXT"))
+    if "messages" in tables:
+        message_columns = {column["name"] for column in inspector.get_columns("messages")}
+        if "status" not in message_columns:
+            additions.append(("messages", "status", "VARCHAR(20) DEFAULT 'completed'"))
+        if "generation_task_id" not in message_columns:
+            additions.append(("messages", "generation_task_id", "VARCHAR(36)"))
     with engine.begin() as connection:
         for table, column, ddl in additions:
             connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
@@ -149,6 +155,21 @@ def _apply_schema_migrations() -> None:
                           WHERE ckb.conversation_id = c.id
                       )
                     """
+                )
+            )
+        if "messages" in tables:
+            connection.execute(
+                text(
+                    "UPDATE messages SET status = 'completed' "
+                    "WHERE status IS NULL OR status = ''"
+                )
+            )
+        if "generation_tasks" in tables:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_generation_tasks_active_conversation "
+                    "ON generation_tasks (conversation_id) "
+                    "WHERE status IN ('queued', 'running')"
                 )
             )
 

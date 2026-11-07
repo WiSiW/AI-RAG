@@ -135,6 +135,14 @@ class ConversationMemory:
         return message.role == "assistant" and bool(usage.get("stopped"))
 
     @staticmethod
+    def _is_incomplete_assistant(message: Message) -> bool:
+        return message.role == "assistant" and str(getattr(message, "status", None) or "completed") in {
+            "pending",
+            "streaming",
+            "failed",
+        }
+
+    @staticmethod
     def _truncate_message(content: str, max_tokens: int) -> tuple[str, bool]:
         if max_tokens <= 0 or count_tokens(content) <= max_tokens:
             return content, False
@@ -162,6 +170,9 @@ class ConversationMemory:
                     message.content, max_message_tokens
                 )
                 if next_message is not None and next_message.role == "assistant":
+                    if cls._is_incomplete_assistant(next_message):
+                        index += 2
+                        continue
                     if cls._is_stopped_assistant(next_message):
                         block_text = f"[未完成提问]\n用户：{user_text}"
                         message_count = 2
@@ -180,7 +191,7 @@ class ConversationMemory:
                     truncated = user_truncated
                     index += 1
             else:
-                if cls._is_stopped_assistant(message):
+                if cls._is_stopped_assistant(message) or cls._is_incomplete_assistant(message):
                     index += 1
                     continue
                 assistant_text, assistant_truncated = cls._truncate_message(
@@ -302,28 +313,111 @@ class ConversationMemory:
         context: list[dict],
         usage: dict,
     ) -> Message:
+        user_message, assistant_message = self.start_exchange(
+            db,
+            conversation,
+            question=question,
+            rewritten_query=rewritten_query,
+        )
+        return self.finish_exchange(
+            db,
+            conversation,
+            assistant_message,
+            answer=answer,
+            rewritten_query=rewritten_query,
+            citations=citations,
+            context=context,
+            usage=usage,
+        )
+
+    def start_exchange(
+        self,
+        db: Session,
+        conversation: Conversation,
+        *,
+        question: str,
+        rewritten_query: str = "",
+        user_message_id: str | None = None,
+        assistant_message_id: str | None = None,
+        generation_task_id: str | None = None,
+        commit: bool = True,
+    ) -> tuple[Message, Message]:
         user_message = Message(
-            id=str(uuid.uuid4()),
+            id=user_message_id or str(uuid.uuid4()),
             conversation_id=conversation.id,
             role="user",
             content=question,
             rewritten_query=rewritten_query,
+            status="completed",
+            generation_task_id=generation_task_id,
         )
         assistant_message = Message(
-            id=str(uuid.uuid4()),
+            id=assistant_message_id or str(uuid.uuid4()),
             conversation_id=conversation.id,
             role="assistant",
-            content=answer,
+            content="",
             rewritten_query=rewritten_query,
-            citations=[citation.model_dump() for citation in citations],
-            context=context,
-            usage=usage,
+            status="pending",
+            generation_task_id=generation_task_id,
         )
         db.add_all([user_message, assistant_message])
+        conversation.updated_at = datetime.now(UTC)
+        if commit:
+            db.commit()
+            db.refresh(user_message)
+            db.refresh(assistant_message)
+            self.invalidate(conversation.id)
+        else:
+            db.flush()
+        return user_message, assistant_message
+
+    def finish_exchange(
+        self,
+        db: Session,
+        conversation: Conversation,
+        assistant_message: Message,
+        *,
+        answer: str,
+        rewritten_query: str,
+        citations: list[Citation],
+        context: list[dict],
+        usage: dict,
+        status: str = "completed",
+    ) -> Message:
+        assistant_message.content = answer
+        assistant_message.rewritten_query = rewritten_query
+        assistant_message.citations = [citation.model_dump() for citation in citations]
+        assistant_message.context = context
+        assistant_message.usage = usage
+        assistant_message.status = status
+        if assistant_message.generation_task_id:
+            user_message = db.scalar(
+                select(Message).where(
+                    Message.generation_task_id == assistant_message.generation_task_id,
+                    Message.role == "user",
+                )
+            )
+            if user_message is not None:
+                user_message.rewritten_query = rewritten_query
         conversation.updated_at = datetime.now(UTC)
         db.commit()
         self.invalidate(conversation.id)
         return assistant_message
+
+    def mark_task_message_status(
+        self,
+        db: Session,
+        assistant_message: Message,
+        *,
+        status: str,
+        error: str = "",
+    ) -> None:
+        assistant_message.status = status
+        usage = dict(assistant_message.usage or {})
+        if error:
+            usage["error"] = error
+        assistant_message.usage = usage
+        db.commit()
 
     @staticmethod
     def json_messages(messages: list[Message]) -> list[dict]:

@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     rag_prompt_max_tokens: int = 12000
     rag_answer_reserve_tokens: int = 1200
     rag_prompt_overhead_tokens: int = 800
+    chat_task_event_ttl_seconds: int = 86400
+    chat_task_sse_heartbeat_seconds: int = 15
+    chat_task_token_flush_ms: int = 50
+    chat_task_stale_seconds: int = 90
+    chat_task_stream_maxlen: int = 10000
     enrichment_batch_size: int = 8
     enrichment_max_tokens: int = 4096
     qa_generation_batch_size: int = 4

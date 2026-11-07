@@ -12,8 +12,8 @@ class NotFoundError(AppError):
 
 
 class ConflictError(AppError):
-    def __init__(self, message: str):
-        super().__init__(message, status_code=409, code="conflict")
+    def __init__(self, message: str, code: str = "conflict"):
+        super().__init__(message, status_code=409, code=code)
 
 
 class ValidationError(AppError):

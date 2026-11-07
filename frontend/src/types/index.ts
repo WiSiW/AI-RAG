@@ -251,7 +251,29 @@ export interface Message {
   citations: Citation[];
   context: Array<Record<string, unknown>>;
   usage: Record<string, unknown>;
+  status: "pending" | "streaming" | "completed" | "stopped" | "failed";
+  generation_task_id: string | null;
   created_at: string;
+}
+
+export type GenerationTaskStatus = "queued" | "running" | "completed" | "cancelled" | "failed";
+export type GenerationTaskPhase = "retrieving" | "generating";
+
+export interface GenerationTask {
+  id: string;
+  conversation_id: string;
+  user_message_id: string;
+  assistant_message_id: string;
+  status: GenerationTaskStatus;
+  phase: GenerationTaskPhase;
+  cancel_requested: boolean;
+  last_event_id: string | null;
+  content: string;
+  citations: Citation[];
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 export interface Conversation {
@@ -270,6 +292,7 @@ export interface Conversation {
   created_at: string;
   updated_at: string;
   message_count: number;
+  active_task: GenerationTask | null;
 }
 
 export interface ConversationDetail extends Conversation {
@@ -294,6 +317,26 @@ export interface ChatResponse {
   usage: Record<string, unknown>;
   retrieval_trace: RetrievalTrace | null;
   uncertainty_notice: string;
+}
+
+export interface ChatTaskCreatePayload {
+  knowledge_base_ids: string[];
+  query: string;
+  conversation_id?: string;
+  llm_profile_id?: string;
+  rerank_profile_id?: string;
+  document_id?: string;
+  retrieval_mode?: "auto" | "single" | "multi";
+  client_request_id: string;
+}
+
+export interface ChatTaskCreated {
+  task_id: string;
+  conversation_id: string;
+  user_message_id: string;
+  assistant_message_id: string;
+  status: GenerationTaskStatus;
+  last_event_id: string | null;
 }
 
 export interface ModelTestResult {

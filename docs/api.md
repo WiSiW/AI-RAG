@@ -75,6 +75,10 @@ Rerank 的高级配置支持 `rerank_path`（默认 `rerank`）、`rerank_batch_
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/chat` | 流式或非流式问答 |
+| POST | `/chat/tasks` | 创建可恢复的后台问答任务 |
+| GET | `/chat/tasks/{id}` | 查询任务状态与流式回答快照 |
+| GET | `/chat/tasks/{id}/events` | 订阅或断点续传任务 SSE |
+| POST | `/chat/tasks/{id}/cancel` | 取消指定生成任务 |
 | POST | `/search` | 检索调试 |
 | GET | `/conversations` | 历史会话列表 |
 | GET | `/conversations/{id}` | 会话详情 |
@@ -270,6 +274,37 @@ data: {"conversation_id":"...","message_id":"...","usage":{...}}
 event: error
 data: {"message":"错误详情"}
 ```
+
+### 可恢复任务式问答
+
+管理端多会话页面使用任务式接口；`POST /chat` 与发布 API 的现有流式语义继续保留。任务式接口要求 Redis 和独立
+`chat_generation` Celery 队列可用，不可用时返回 `503 chat_task_unavailable`。
+
+创建任务：
+
+```json
+{
+  "knowledge_base_ids": ["kb-1"],
+  "query": "请介绍 RAG 架构",
+  "conversation_id": null,
+  "llm_profile_id": "llm-1",
+  "document_id": null,
+  "retrieval_mode": "auto",
+  "client_request_id": "客户端生成的幂等 ID"
+}
+```
+
+接口返回 `202`，包含 `task_id`、`conversation_id`、`user_message_id`、`assistant_message_id`、`status` 和
+`last_event_id`。同一 `client_request_id` 重复提交会返回同一任务；同一会话已有 `queued/running` 任务时返回
+`409 conversation_busy`。
+
+`GET /chat/tasks/{id}/events` 返回与 `/chat` 相同业务事件，并增加 `queued`、`cancelled` 和 `snapshot`。
+每条 SSE 事件均带 Redis Stream `id`，数据中额外包含 `task_id`、`conversation_id`、`assistant_message_id`
+和递增 `seq`。客户端通过 `Last-Event-ID` 请求头或 `after` 查询参数续传；事件保留 24 小时，过期后服务端使用
+PostgreSQL 最终消息返回 `snapshot`。订阅断开不会取消后台任务，只有调用取消接口才会停止生成。
+
+会话列表和详情响应增加可空的 `active_task`，消息响应增加 `status` 和 `generation_task_id`。同一会话默认互斥，
+不同会话可并行生成。
 
 首个 `stage` 事件在查询改写和检索开始前发送，用于确认会话已经创建并提示当前处于检索阶段；检索结束后、首个回答 token 前发送 `stage=generating`。客户端可通过关闭 SSE 连接停止当前问答。服务端会取消后续检索轮次和模型流，并将已得到的部分回答持久化，助手消息的 `usage` 中会包含 `stopped=true` 和 `stopped_stage=retrieving|generating`。已停止的助手回答仍会出现在会话历史中，但不会进入后续对话的模型上下文或会话摘要；用户问题会以“未完成提问”保留。
 

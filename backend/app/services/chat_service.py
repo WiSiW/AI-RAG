@@ -17,6 +17,7 @@ from app.db.models import (
     DocumentStatus,
     DocumentTable,
     KnowledgeBase,
+    Message,
     ModelKind,
     ModelProfile,
 )
@@ -221,6 +222,7 @@ class ChatService:
         expand_context: bool = False,
         retrieval_mode: str = "single",
         context_budget_tokens: int | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> RetrievalOutcome:
         planner_profile = self._planner_profile(db, knowledge_bases)
         decision = await classify_complexity(
@@ -230,6 +232,8 @@ class ChatService:
             gateway=self.gateway,
             classifier_client=self.complexity_client,
         )
+        if cancel_requested and cancel_requested():
+            return RetrievalOutcome(chunks=[])
         if not decision.is_multi_hop:
             outcome = await self._retrieve_single(
                 db,
@@ -242,6 +246,7 @@ class ChatService:
                 enforce_context_budget=enforce_context_budget,
                 expand_context=expand_context,
                 context_budget_tokens=context_budget_tokens,
+                cancel_requested=cancel_requested,
             )
             outcome.trace = RetrievalTrace(
                 requested_mode=retrieval_mode,
@@ -264,6 +269,7 @@ class ChatService:
             enforce_context_budget=enforce_context_budget,
             expand_context=expand_context,
             context_budget_tokens=context_budget_tokens,
+            cancel_requested=cancel_requested,
         )
 
     async def _retrieve_multi_hop(
@@ -281,6 +287,7 @@ class ChatService:
         enforce_context_budget: bool,
         expand_context: bool,
         context_budget_tokens: int | None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> RetrievalOutcome:
         kb_settings = knowledge_bases[0].settings or {}
         max_steps = max(
@@ -301,6 +308,9 @@ class ChatService:
         uncertain = False
 
         for round_number in range(1, max_steps + 1):
+            if cancel_requested and cancel_requested():
+                stop_reason = "cancelled"
+                break
             round_outcome = await self._retrieve_single(
                 db,
                 knowledge_bases,
@@ -310,6 +320,7 @@ class ChatService:
                 document_id=document_id,
                 enforce_context_budget=False,
                 expand_context=False,
+                cancel_requested=cancel_requested,
             )
             failed_ids.update(round_outcome.failed_knowledge_base_ids)
             new_count = 0
@@ -399,6 +410,11 @@ class ChatService:
             current_query = plan.next_question
             prior_questions.append(current_query)
 
+        if cancel_requested and cancel_requested():
+            return RetrievalOutcome(
+                chunks=list(accumulated.values()),
+                failed_knowledge_base_ids=sorted(failed_ids),
+            )
         candidates = sorted(
             accumulated.values(), key=lambda item: item.rrf_score, reverse=True
         )
@@ -553,7 +569,10 @@ class ChatService:
         enforce_context_budget: bool = True,
         expand_context: bool = False,
         context_budget_tokens: int | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> RetrievalOutcome:
+        if cancel_requested and cancel_requested():
+            return RetrievalOutcome(chunks=[])
         embedding_profiles: dict[str, ModelProfile] = {}
         for knowledge_base in knowledge_bases:
             profile = self._profile(db, knowledge_base.embedding_profile_id, ModelKind.EMBEDDING)
@@ -566,6 +585,8 @@ class ChatService:
             *[self.gateway.embed_texts(embedding_profiles[profile_id], [query]) for profile_id in profile_ids],
             return_exceptions=True,
         )
+        if cancel_requested and cancel_requested():
+            return RetrievalOutcome(chunks=[])
         query_vectors: dict[str, list[float]] = {}
         for profile_id, result in zip(profile_ids, embedding_results, strict=True):
             if isinstance(result, Exception):
@@ -1271,6 +1292,9 @@ class ChatService:
         request: ChatRequest,
         *,
         citation_url_builder: CitationUrlBuilder | None = None,
+        task_id: str | None = None,
+        assistant_message_id: str | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ):
         knowledge_bases = self._get_kbs(db, request.knowledge_base_ids)
         self._validate_document(db, knowledge_bases, request.document_id)
@@ -1294,6 +1318,9 @@ class ChatService:
         answer_parts: list[str] = []
         exchange_saved = False
 
+        def should_cancel() -> bool:
+            return bool(cancel_requested and cancel_requested())
+
         def exchange_payload() -> tuple[str, list[Citation], dict]:
             answer = "".join(answer_parts)
             citations = self._attach_citation_urls(
@@ -1312,7 +1339,68 @@ class ChatService:
                     usage["retrieval_trace"] = outcome.trace.model_dump()
             return answer, citations, usage
 
+        def persist_exchange(status: str, stopped_stage: str | None = None) -> Message:
+            nonlocal exchange_saved
+            answer, citations, usage = exchange_payload()
+            if stopped_stage:
+                usage["stopped"] = True
+                usage["stopped_stage"] = stopped_stage
+            if assistant_message_id and task_id:
+                assistant_message = db.get(Message, assistant_message_id)
+                if (
+                    assistant_message is None
+                    or assistant_message.conversation_id != conversation.id
+                    or assistant_message.generation_task_id != task_id
+                ):
+                    raise NotFoundError("生成任务消息不存在")
+                message = self.memory.finish_exchange(
+                    db,
+                    conversation,
+                    assistant_message,
+                    answer=answer,
+                    rewritten_query=rewritten_query,
+                    citations=citations,
+                    context=self._context_payload(chunks),
+                    usage=usage,
+                    status=status,
+                )
+            else:
+                message = self.memory.add_exchange(
+                    db,
+                    conversation,
+                    question=request.query,
+                    answer=answer,
+                    rewritten_query=rewritten_query,
+                    citations=citations,
+                    context=self._context_payload(chunks),
+                    usage=usage,
+                )
+            exchange_saved = True
+            return message
+
+        async def cancelled_events():
+            message = persist_exchange("stopped", stage)
+            answer, citations, usage = exchange_payload()
+            yield sse_event(
+                "citations",
+                {"citations": [citation.model_dump() for citation in citations]},
+            )
+            yield sse_event(
+                "cancelled",
+                {
+                    "conversation_id": conversation.id,
+                    "message_id": message.id,
+                    "answer": answer,
+                    "usage": usage,
+                    "stopped_stage": stage,
+                },
+            )
+
         try:
+            if assistant_message_id and task_id:
+                assistant_message = db.get(Message, assistant_message_id)
+                if assistant_message is not None:
+                    self.memory.mark_task_message_status(db, assistant_message, status="streaming")
             yield sse_event(
                 "stage",
                 ChatStageEvent(
@@ -1320,12 +1408,20 @@ class ChatService:
                     conversation_id=conversation.id,
                 ).model_dump(),
             )
+            if should_cancel():
+                async for event in cancelled_events():
+                    yield event
+                return
             rewritten_query = await self._rewrite_query(
                 query=request.query,
                 history=history_context.text,
                 llm_profile=llm_profile,
                 scope="、".join(knowledge_base.name for knowledge_base in knowledge_bases),
             )
+            if should_cancel():
+                async for event in cancelled_events():
+                    yield event
+                return
             outcome = await self._retrieve(
                 db,
                 knowledge_bases,
@@ -1335,8 +1431,13 @@ class ChatService:
                 expand_context=True,
                 retrieval_mode=request.retrieval_mode,
                 context_budget_tokens=context_budget,
+                cancel_requested=cancel_requested,
             )
             chunks = outcome.chunks
+            if should_cancel():
+                async for event in cancelled_events():
+                    yield event
+                return
             if outcome.trace:
                 yield sse_event(
                     "retrieval_plan",
@@ -1354,6 +1455,10 @@ class ChatService:
                         "uncertainty_notice": outcome.trace.uncertainty_notice,
                     },
                 )
+            if should_cancel():
+                async for event in cancelled_events():
+                    yield event
+                return
             stage = "generating"
             yield sse_event(
                 "stage",
@@ -1394,11 +1499,17 @@ class ChatService:
                         {"role": "user", "content": prompt},
                     ],
                 ):
+                    if should_cancel():
+                        break
                     answer_parts.append(token)
                     yield sse_event("token", {"content": token})
             else:
                 answer_parts.append(NO_ANSWER)
                 yield sse_event("token", {"content": NO_ANSWER})
+            if should_cancel():
+                async for event in cancelled_events():
+                    yield event
+                return
             uncertainty_notice = (
                 outcome.trace.uncertainty_notice
                 if outcome.trace and outcome.trace.uncertain
@@ -1409,18 +1520,8 @@ class ChatService:
                 notice_chunk = f"\n\n{uncertainty_notice}"
                 answer_parts.append(notice_chunk)
                 yield sse_event("token", {"content": notice_chunk})
+            message = persist_exchange("completed")
             answer, citations, usage = exchange_payload()
-            message = self.memory.add_exchange(
-                db,
-                conversation,
-                question=request.query,
-                answer=answer,
-                rewritten_query=rewritten_query,
-                citations=citations,
-                context=self._context_payload(chunks),
-                usage=usage,
-            )
-            exchange_saved = True
             yield sse_event(
                 "citations",
                 {"citations": [citation.model_dump() for citation in citations]},
@@ -1438,26 +1539,27 @@ class ChatService:
         except (asyncio.CancelledError, GeneratorExit):
             if not exchange_saved:
                 try:
-                    answer, citations, usage = exchange_payload()
-                    usage["stopped"] = True
-                    usage["stopped_stage"] = stage
-                    self.memory.add_exchange(
-                        db,
-                        conversation,
-                        question=request.query,
-                        answer=answer,
-                        rewritten_query=rewritten_query,
-                        citations=citations,
-                        context=self._context_payload(chunks),
-                        usage=usage,
-                    )
+                    message = persist_exchange("stopped", stage)
                     self.summary_service.maybe_schedule(db, conversation)
+                    logger.info("chat stream closed; partial answer saved message_id=%s", message.id)
                 except Exception:
                     db.rollback()
                     logger.exception("failed to persist stopped chat")
             raise
         except Exception as exc:
             logger.exception("streaming chat failed")
+            if task_id and assistant_message_id and not exchange_saved:
+                try:
+                    message = persist_exchange("failed")
+                    self.memory.mark_task_message_status(
+                        db,
+                        message,
+                        status="failed",
+                        error=str(exc),
+                    )
+                except Exception:
+                    db.rollback()
+                    logger.exception("failed to persist failed chat task")
             yield sse_event("error", {"message": str(exc)})
 
 

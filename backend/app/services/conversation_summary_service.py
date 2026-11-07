@@ -172,6 +172,14 @@ class ConversationSummaryService:
         usage = message.usage if isinstance(message.usage, dict) else {}
         return message.role == "assistant" and bool(usage.get("stopped"))
 
+    @staticmethod
+    def _is_incomplete_assistant(message: Message) -> bool:
+        return message.role == "assistant" and str(getattr(message, "status", None) or "completed") in {
+            "pending",
+            "streaming",
+            "failed",
+        }
+
     @classmethod
     def _summary_messages(cls, messages: list[Message]) -> list[_SummaryMessage]:
         prepared: list[_SummaryMessage] = []
@@ -182,6 +190,9 @@ class ConversationSummaryService:
             if message.role == "user":
                 next_message = messages[index + 1] if index + 1 < len(messages) else None
                 if next_message is not None and next_message.role == "assistant":
+                    if cls._is_incomplete_assistant(next_message):
+                        index += 2
+                        continue
                     if cls._is_stopped_assistant(next_message):
                         content = f"[未完成提问] {content}"
                         prepared.append(_SummaryMessage(message.id, "user", content))
@@ -201,7 +212,7 @@ class ConversationSummaryService:
                     index += 2
                     continue
                 prepared.append(_SummaryMessage(message.id, "user", content))
-            elif not cls._is_stopped_assistant(message):
+            elif not cls._is_stopped_assistant(message) and not cls._is_incomplete_assistant(message):
                 prepared.append(_SummaryMessage(message.id, "assistant", content))
             index += 1
         return [item for item in prepared if item.content]

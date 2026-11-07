@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.db.models import KnowledgeBase
 from app.db.session import SessionLocal
 from app.evaluation.service import ChunkEvaluationService
+from app.services.chat_task_service import ChatTaskService
 from app.services.chunk_tuning_service import ChunkTuningService
 from app.services.conversation_summary_service import ConversationSummaryService
 from app.services.ingestion_service import IngestionService
@@ -13,6 +14,15 @@ from app.services.knowledge_base_transfer_service import KnowledgeBaseTransferSe
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+
+
+@celery_app.task(
+    name="zhiyuan.run_chat_generation",
+    time_limit=30 * 60,
+    soft_time_limit=29 * 60,
+)
+def run_chat_generation_task(task_id: str) -> None:
+    asyncio.run(ChatTaskService().run(task_id))
 
 
 @celery_app.task(

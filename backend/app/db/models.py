@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -671,6 +671,9 @@ class Conversation(Base):
         cascade="all, delete-orphan",
         order_by="ConversationKnowledgeBase.position",
     )
+    generation_tasks = relationship(
+        "GenerationTask", back_populates="conversation", cascade="all, delete-orphan"
+    )
 
 
 class ConversationKnowledgeBase(Base):
@@ -701,9 +704,45 @@ class Message(Base):
     citations: Mapped[list] = mapped_column(JSON, default=list)
     context: Mapped[list] = mapped_column(JSON, default=list)
     usage: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="completed", index=True)
+    generation_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     conversation = relationship("Conversation", back_populates="messages")
+
+
+class GenerationTask(Base):
+    __tablename__ = "generation_tasks"
+    __table_args__ = (
+        Index(
+            "uq_generation_tasks_active_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+            sqlite_where=text("status IN ('queued', 'running')"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    user_message_id: Mapped[str] = mapped_column(String(36))
+    assistant_message_id: Mapped[str] = mapped_column(String(36))
+    client_request_id: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    request_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    celery_task_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    phase: Mapped[str] = mapped_column(String(20), default="retrieving")
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_event_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    conversation = relationship("Conversation", back_populates="generation_tasks")
 
 
 class Feedback(Base):

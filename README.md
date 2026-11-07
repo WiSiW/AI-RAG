@@ -176,7 +176,7 @@ docker compose up -d --build
 
 ```powershell
 docker compose ps
-docker compose logs -f backend worker pdf-process pdf-worker
+docker compose logs -f backend worker chat-worker pdf-process pdf-worker
 ```
 
 ## 首次使用流程

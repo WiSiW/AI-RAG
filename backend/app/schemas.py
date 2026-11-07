@@ -23,6 +23,9 @@ KnowledgeBaseExportMode = Literal["documents", "full"]
 KnowledgeBaseIndexPolicy = Literal["strict", "rebuild"]
 RetrievalModeValue = Literal["auto", "single", "multi"]
 ChatStageValue = Literal["retrieving", "generating"]
+GenerationTaskStatusValue = Literal["queued", "running", "completed", "cancelled", "failed"]
+GenerationTaskPhaseValue = Literal["retrieving", "generating"]
+MessageStatusValue = Literal["pending", "streaming", "completed", "stopped", "failed"]
 SummaryStatusValue = Literal["idle", "running", "succeeded", "degraded", "failed"]
 ParsingEngineCategory = Literal["ocr", "table", "layout"]
 
@@ -886,6 +889,28 @@ class ChatRequest(BaseModel):
         return self
 
 
+class ChatTaskCreateRequest(BaseModel):
+    knowledge_base_id: str | None = None
+    knowledge_base_ids: list[str] = Field(default_factory=list, max_length=20)
+    query: str = Field(min_length=1, max_length=20000)
+    conversation_id: str | None = None
+    llm_profile_id: str | None = None
+    rerank_profile_id: str | None = None
+    document_id: str | None = None
+    retrieval_mode: RetrievalModeValue = "auto"
+    client_request_id: str = Field(min_length=8, max_length=100)
+
+    @model_validator(mode="after")
+    def normalize_scope(self) -> "ChatTaskCreateRequest":
+        self.knowledge_base_ids = _normalize_scope(
+            self.knowledge_base_id, self.knowledge_base_ids, required=True
+        )
+        self.knowledge_base_id = (
+            self.knowledge_base_ids[0] if len(self.knowledge_base_ids) == 1 else None
+        )
+        return self
+
+
 class ChatResponse(BaseModel):
     conversation_id: str
     message_id: str
@@ -907,7 +932,35 @@ class MessageRead(ORMModel):
     citations: list[Citation]
     context: list[dict[str, Any]]
     usage: dict[str, Any]
+    status: MessageStatusValue = "completed"
+    generation_task_id: str | None = None
     created_at: datetime
+
+
+class GenerationTaskRead(BaseModel):
+    id: str
+    conversation_id: str
+    user_message_id: str
+    assistant_message_id: str
+    status: GenerationTaskStatusValue
+    phase: GenerationTaskPhaseValue
+    cancel_requested: bool = False
+    last_event_id: str | None = None
+    content: str = ""
+    citations: list[Citation] = Field(default_factory=list)
+    error: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ChatTaskCreated(BaseModel):
+    task_id: str
+    conversation_id: str
+    user_message_id: str
+    assistant_message_id: str
+    status: GenerationTaskStatusValue
+    last_event_id: str | None = None
 
 
 class ConversationRead(ORMModel):
@@ -926,6 +979,7 @@ class ConversationRead(ORMModel):
     created_at: datetime
     updated_at: datetime
     message_count: int = 0
+    active_task: GenerationTaskRead | None = None
 
 
 class ConversationDetail(ConversationRead):

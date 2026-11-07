@@ -17,6 +17,10 @@ celery_app.conf.update(
     task_time_limit=1800,
     task_soft_time_limit=1740,
     broker_connection_retry_on_startup=True,
+    task_default_queue="celery",
+    task_routes={
+        "zhiyuan.run_chat_generation": {"queue": "chat_generation"},
+    },
 )
 
 from app.workers import tasks  # noqa: E402,F401

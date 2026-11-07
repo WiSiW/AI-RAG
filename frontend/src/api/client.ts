@@ -2,6 +2,8 @@ import type {
   BatchUploadResponse,
   Capabilities,
   ChatResponse,
+  ChatTaskCreated,
+  ChatTaskCreatePayload,
   Chunk,
   ChunkEvaluationResultsPage,
   ChunkEvaluationChunksPage,
@@ -15,6 +17,7 @@ import type {
   DocumentDetail,
   DocumentItem,
   DocumentTable,
+  GenerationTask,
   IngestionJob,
   KnowledgeBase,
   KnowledgeBasePackageInspection,
@@ -468,6 +471,14 @@ export const api = {
   getConversation: (id: string) => request<ConversationDetail>(`/conversations/${id}`),
   deleteConversation: (id: string) =>
     request<void>(`/conversations/${id}`, { method: "DELETE" }),
+  createChatTask: (payload: ChatTaskCreatePayload) =>
+    request<ChatTaskCreated>("/chat/tasks", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  getChatTask: (id: string) => request<GenerationTask>(`/chat/tasks/${id}`),
+  cancelChatTask: (id: string) =>
+    request<GenerationTask>(`/chat/tasks/${id}/cancel`, { method: "POST" }),
 
   sendFeedback: (messageId: string, rating: 1 | -1, comment = "") =>
     request("/feedback", {
@@ -511,7 +522,7 @@ export interface ChatPayload {
 }
 
 export interface StreamCallbacks {
-  onEvent: (event: string, data: Record<string, unknown>) => void;
+  onEvent: (event: string, data: Record<string, unknown>, eventId?: string) => void;
   onError: (error: Error) => void;
 }
 
@@ -567,16 +578,67 @@ export async function streamChat(
 function parseEventBlock(block: string, callbacks: StreamCallbacks): void {
   if (!block.trim()) return;
   let event = "message";
+  let eventId: string | undefined;
   const dataLines: string[] = [];
   for (const line of block.split("\n")) {
+    if (line.startsWith("id:")) eventId = line.slice(3).trim();
     if (line.startsWith("event:")) event = line.slice(6).trim();
     if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
   }
   if (!dataLines.length) return;
   try {
-    callbacks.onEvent(event, JSON.parse(dataLines.join("\n")) as Record<string, unknown>);
+    callbacks.onEvent(event, JSON.parse(dataLines.join("\n")) as Record<string, unknown>, eventId);
   } catch (error) {
     callbacks.onError(new Error(`无法解析流式事件：${(error as Error).message}`));
+  }
+}
+
+export async function streamChatTaskEvents(
+  taskId: string,
+  callbacks: StreamCallbacks,
+  signal?: AbortSignal,
+  after?: string | null,
+): Promise<void> {
+  const query = after ? `?after=${encodeURIComponent(after)}` : "";
+  const headers = new Headers({ Authorization: `Bearer ${getToken()}` });
+  if (after) headers.set("Last-Event-ID", after);
+  const response = await fetch(`${API_BASE}/chat/tasks/${taskId}/events${query}`, {
+    headers,
+    signal,
+  });
+  if (!response.ok) {
+    let message = `请求失败 (${response.status})`;
+    try {
+      const payload = await response.json();
+      message = payload?.error?.message ?? payload?.detail ?? message;
+    } catch {
+      // Keep the HTTP fallback message.
+    }
+    if (response.status === 401) clearToken();
+    throw new ApiError(message, response.status);
+  }
+  if (!response.body) throw new ApiError("浏览器不支持流式响应", 0);
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        if (block.startsWith(":")) continue;
+        parseEventBlock(block, callbacks);
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+  } catch (error) {
+    if ((error as Error).name !== "AbortError") callbacks.onError(error as Error);
+    throw error;
   }
 }
 
